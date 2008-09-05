@@ -229,7 +229,7 @@ static inline u64 recalc_gapsize(struct psp_sched_data *q,
 				 struct psp_class *cl, unsigned int len)
 {
 	unsigned int base = len + FCS;
-	u64 ipg, gapsize;
+	u64 ipg;
 
 	if (cl->rate == 0) /* XXX */
 		return 0;
@@ -237,8 +237,11 @@ static inline u64 recalc_gapsize(struct psp_sched_data *q,
 	ipg = q->max_rate * base;
 	do_div(ipg, cl->rate);
 	ipg -= base;
-	gapsize = ipg - HW_GAP(q); /* gap between real/gap packets */
-	return max_t(u64, gapsize, MIN_GAP + HW_GAP(q) + FCS);
+	if (ipg > HW_GAP(q))
+		return ipg - HW_GAP(q); /* gap between real/gap packets */
+
+	printk(KERN_WARNING "psp: ipg(%lld) is smaller than HW_GAP.\n", ipg);
+	return 0;
 }
 
 #define PSP_DIRECT (struct psp_class *)(-1)
@@ -490,7 +493,7 @@ static struct psp_class *lookup_next_class(struct Qdisc *sch, u64 *gapsize)
 	list_for_each_entry(cl, &q->pacing_list, plist) {
 		if (found == NULL && cl->clock > q->clock) {
 			diff = cl->clock - q->clock;
-			if (nearest > diff)
+			if (nearest > diff && diff >= MIN_GAP)
 				nearest = diff;
 			continue;
 		}
@@ -522,10 +525,8 @@ static struct psp_class *lookup_next_class(struct Qdisc *sch, u64 *gapsize)
 	tmp = q->mtu + HW_GAP(q) + FCS;
 	npkts = nearest + tmp - 1;
 	do_div(npkts, tmp);
-
 	do_div(nearest, npkts);
-	nearest -= HW_GAP(q) + FCS;
-	*gapsize = max_t(u64, nearest, sizeof(struct gaphdr));
+	*gapsize = nearest - (HW_GAP(q) + FCS);
 	return NULL;
 }
 
