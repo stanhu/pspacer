@@ -159,8 +159,11 @@ struct gaphdr {
 	__be16 h_proto;				/* MAC control */
 	__be16 h_opcode;			/* MAC control opcode */
 	__be16 h_param;				/* pause time */
-	__be16 h_len;				/* length (non standard); It is
-						   used for debugging only. */
+	union {
+		__be16 h_len;			/* (NON STANDARD) It is used
+						   for debugging only. */
+		unsigned char reserved[42];	/* must be zero */
+	};
 } __attribute__((packed));
 
 /* The destination address must be specified as 01:80:c2:00:00:01. */
@@ -696,19 +699,19 @@ static void psp_reset(struct Qdisc *sch)
 	sch->q.qlen = 0;
 }
 
-static int psp_change(struct Qdisc *sch, struct rtattr *opt)
+static int psp_change(struct Qdisc *sch, struct nlattr *opt)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
-	struct rtattr *tb[TCA_PSP_QOPT];
+	struct nlattr *tb[_OPT(TCA_PSP_MAX + 1)];
 	struct tc_psp_qopt *qopt;
 
-	if (opt == 0 || rtattr_parse_nested(tb, TCA_PSP_QOPT, opt) ||
-	    tb[TCA_PSP_QOPT-1] == NULL ||
-	    RTA_PAYLOAD(tb[TCA_PSP_QOPT-1]) < sizeof(*qopt)) {
+	if (opt == 0 || nla_parse_nested(tb, TCA_PSP_MAX, opt, NULL) ||
+	    tb[_OPT(TCA_PSP_QOPT)] == NULL ||
+	    nla_len(tb[_OPT(TCA_PSP_QOPT)]) < sizeof(*qopt)) {
 		return -EINVAL;
 	}
 
-	qopt = RTA_DATA(tb[TCA_PSP_QOPT-1]);
+	qopt = nla_data(tb[_OPT(TCA_PSP_QOPT)]);
 
 	sch_tree_lock(sch);
 	if (qopt->defcls)
@@ -724,7 +727,7 @@ static int psp_change(struct Qdisc *sch, struct rtattr *opt)
 	return 0;
 }
 
-static int psp_init(struct Qdisc *sch, struct rtattr *opt)
+static int psp_init(struct Qdisc *sch, struct nlattr *opt)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct net_device *dev = sch->dev;
@@ -790,8 +793,8 @@ static int psp_init(struct Qdisc *sch, struct rtattr *opt)
 }
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,22)
-/* Use tcf_destroy_chain() instead of psp_destroy_filters(). */
-static void psp_destroy_filters(struct tcf_proto **fl)
+/* The older kernels lack tcf_destroy_chain(). */
+static void psp_destroy_chain(struct tcf_proto **fl)
 {
 	struct tcf_proto *tp;
 
@@ -800,6 +803,10 @@ static void psp_destroy_filters(struct tcf_proto **fl)
 		tcf_destroy(tp);
 	}
 }
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(2,6,26)
+#define psp_destroy_chain(fl) tcf_destroy_chain(*(fl))
+#else
+#define psp_destroy_chain tcf_destroy_chain
 #endif
 
 static void psp_destroy_class(struct Qdisc *sch, struct psp_class *cl)
@@ -814,11 +821,7 @@ static void psp_destroy_class(struct Qdisc *sch, struct psp_class *cl)
 			q->allocated_rate -= cl->rate;
 	}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,22)
-	tcf_destroy_chain(cl->filter_list);
-#else
-	psp_destroy_filters(&cl->filter_list);
-#endif
+	psp_destroy_chain(&cl->filter_list);
 
 	list_for_each_entry_safe(pos, next, &cl->children, sibling)
 		psp_destroy_class(sch, pos);
@@ -838,11 +841,7 @@ static void psp_destroy(struct Qdisc *sch)
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl, *next;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,22)
-	tcf_destroy_chain(q->filter_list);
-#else
-	psp_destroy_filters(&q->filter_list);
-#endif
+	psp_destroy_chain(&q->filter_list);
 
 	list_for_each_entry_safe(cl, next, &q->root, sibling)
 		psp_destroy_class(sch, cl);
@@ -856,26 +855,29 @@ static void psp_destroy(struct Qdisc *sch)
 static int psp_dump(struct Qdisc *sch, struct sk_buff *skb)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,25)
 	unsigned char *b = skb_tail_pointer(skb);
-	struct rtattr *rta;
+#endif
+	struct nlattr *nla;
 	struct tc_psp_qopt qopt;
 
 	qopt.defcls = q->defcls;
 	qopt.ifg = q->ifg;
 	qopt.rate = q->max_rate;
 	qopt.direct_pkts = q->direct_pkts;
-	rta = (struct rtattr *)b;
-	RTA_PUT(skb, TCA_OPTIONS, 0, NULL);
-	RTA_PUT(skb, TCA_PSP_QOPT, sizeof(qopt), &qopt);
-	rta->rta_len = skb_tail_pointer(skb) - b;
+	nla = nla_nest_start(skb, TCA_OPTIONS);
+	if (nla == NULL)
+		goto nla_put_failure;
+	NLA_PUT(skb, TCA_PSP_QOPT, sizeof(qopt), &qopt);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,10)
 	QSTATS(sch).qlen = sch->q.qlen;
-	RTA_PUT(skb, TCA_STATS, sizeof(BSTATS(sch)), &BSTATS(sch));
-	RTA_PUT(skb, TCA_XSTATS, sizeof(q->xstats), &q->xstats);
+	NLA_PUT(skb, TCA_STATS, sizeof(BSTATS(sch)), &BSTATS(sch));
+	NLA_PUT(skb, TCA_XSTATS, sizeof(q->xstats), &q->xstats);
 #endif
+	nla_nest_end(skb, nla);
 	return skb->len;
 
- rtattr_failure:
+ nla_put_failure:
 	skb_trim(skb, skb_tail_pointer(skb) - skb->data);
 	return -1;
 }
@@ -894,7 +896,7 @@ static int psp_dump_class(struct Qdisc *sch, unsigned long arg,
 {
 	struct psp_class *cl = (struct psp_class *)arg;
 	unsigned char *b = skb_tail_pointer(skb);
-	struct rtattr *rta;
+	struct nlattr *nla;
 	struct tc_psp_copt copt;
 
 	tcm->tcm_parent = cl->parent ? cl->parent->classid : TC_H_ROOT;
@@ -904,22 +906,23 @@ static int psp_dump_class(struct Qdisc *sch, unsigned long arg,
 		QSTATS(cl).qlen = cl->qdisc->q.qlen;
 	}
 
-	rta = (struct rtattr *)b;
-	RTA_PUT(skb, TCA_OPTIONS, 0, NULL);
+	nla = nla_nest_start(skb, TCA_OPTIONS);
+	if (nla == NULL)
+		goto nla_put_failure;
 	memset(&copt, 0, sizeof(copt));
 	copt.level = cl->level;
 	copt.mode = cl->state & MODE_MASK;
 	copt.rate = cl->max_rate;
-	RTA_PUT(skb, TCA_PSP_COPT, sizeof(copt), &copt);
-	RTA_PUT(skb, TCA_PSP_QOPT, 0, NULL);
-	rta->rta_len = skb_tail_pointer(skb) - b;
+	NLA_PUT(skb, TCA_PSP_COPT, sizeof(copt), &copt);
+	NLA_PUT(skb, TCA_PSP_QOPT, 0, NULL);
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,10)
-	RTA_PUT(skb, TCA_STATS, sizeof(cl->stats), &cl->stats);
+	NLA_PUT(skb, TCA_STATS, sizeof(cl->stats), &cl->stats);
 #endif
+	nla_nest_end(skb, nla);
 	return skb->len;
 
- rtattr_failure:
+ nla_put_failure:
 	skb_trim(skb, b - skb->data);
 	return -1;
 }
@@ -991,20 +994,20 @@ static void psp_put(struct Qdisc *sch, unsigned long arg)
 }
 
 static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
-			    struct rtattr **tca, unsigned long *arg)
+			    struct nlattr **tca, unsigned long *arg)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl = (struct psp_class *)*arg, *parent;
-	struct rtattr *opt = tca[TCA_OPTIONS-1];
-	struct rtattr *tb[TCA_PSP_MAX];
+	struct nlattr *opt = tca[_OPT(TCA_OPTIONS)];
+	struct nlattr *tb[_OPT(TCA_PSP_MAX + 1)];
 	struct tc_psp_copt *copt;
 	unsigned int limit;
 
 	if (opt == NULL ||
-	    rtattr_parse(tb, TCA_PSP_MAX, RTA_DATA(opt), RTA_PAYLOAD(opt)))
+	    nla_parse(tb, TCA_PSP_MAX, nla_data(opt), nla_len(opt), NULL))
 		return -EINVAL;
 
-	copt = RTA_DATA(tb[TCA_PSP_COPT - 1]);
+	copt = nla_data(tb[_OPT(TCA_PSP_COPT)]);
 
 	parent = (parentid == TC_H_ROOT ? NULL : psp_find(parentid, sch));
 
