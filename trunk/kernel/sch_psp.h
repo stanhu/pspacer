@@ -73,6 +73,7 @@ static inline void *qdisc_priv(struct Qdisc *q)
 	return (void *)q->data;
 }
 #endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,10)
 #define QSTATS(x) (x)->stats
 #define BSTATS(x) (x)->stats
@@ -81,6 +82,7 @@ static inline void *qdisc_priv(struct Qdisc *q)
 #define QSTATS(x) (x)->qstats
 #define BSTATS(x) (x)->bstats
 #endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,14)
 static inline void 
 skb_get_timestamp(const struct sk_buff *skb, struct timeval *stamp)
@@ -96,11 +98,33 @@ skb_set_timestamp(struct sk_buff *skb, const struct timeval *stamp)
 	skb->stamp.tv_usec = stamp->tv_usec;
 }
 #endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,22)
 #define skb_tail_pointer(skb) ((skb)->tail)
 #define skb_reset_network_header(skb) ((skb)->nh.raw = (skb)->data)
 #define ip_hdr(skb) ((skb)->nh.iph)
 #define tcp_hdr(skb) ((skb)->h.th)
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,25)
+#define nlattr rtattr
+#define nla_parse(tb, max, head, len, policy) \
+	rtattr_parse(tb, max, head, len)
+#define nla_parse_nested(tb, max, nla, policy) \
+	rtattr_parse_nested(tb, max, nla)
+#define nla_len(x) RTA_PAYLOAD(x)
+#define nla_data(x) RTA_DATA(x)
+#define NLA_PUT(skb, type, len, data) RTA_PUT(skb, type, len, data)
+#define nla_put_failure rtattr_failure
+#define nla_nest_end(skb,nla) \
+	nla->rta_len = skb_tail_pointer(skb) - b
+#define nla_nest_start(skb,opt) \
+	(struct nlattr *)b; NLA_PUT((skb), (opt), 0, NULL)
+#define nla_nest_cancel(skb, nla) \
+	skb_trim((skb), b - (skb)->data)
+#define _OPT(x) ((x) - 1)
+#else
+#define _OPT(x) (x)
 #endif
 
 #ifndef rtattr_parse_nested
