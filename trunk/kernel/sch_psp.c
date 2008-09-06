@@ -858,7 +858,7 @@ static clock_delta update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	    gapsize1 = update_clocks(skb, sch, cl->parent, len, hw_gap);
 	    p_rate=cl->parent->rate;
 #ifdef SKB_BACKSIZE
-	    if(cl->state & MAJOR_MODE_MASK) {
+	    if(cl->state & TC_PSP_MODE_TCP) {
 		if(!SKB_BACKSIZE(skb)) goto gap0;
 		len=SKB_BACKSIZE(skb);
 	    }
@@ -873,7 +873,7 @@ static clock_delta update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	    q->clock += len + (gapsize1 = len2);
 	    p_rate=q->max_rate;
 #ifdef SKB_BACKSIZE
-	    if(cl->state & MAJOR_MODE_MASK) {
+	    if(cl->state & TC_PSP_MODE_TCP) {
 		if(!SKB_BACKSIZE(skb)) {
 		    *hw_gap += HW_CUT_GAP(gapsize1);
 		    goto gap0;
