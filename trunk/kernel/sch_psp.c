@@ -66,7 +66,8 @@
 #define MIN_TARGET_RATE (1000)	/* 1 KBytes/sec */
 
 //#define CONFIG_NET_SCH_PSP_PKT_GAP
-//#define CONFIG_NET_SCH_PSP_SYN_FAIRNESS
+//#define CONFIG_NET_SCH_PSP_NO_SYN_FAIRNESS
+//#define CONFIG_NET_SCH_PSP_NO_TTL
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 #define PSP_HSIZE (16)
@@ -75,7 +76,13 @@
 #endif
 
 #define ENABLE_PSP_DIRECT
-#define TTL (3*60*10000) /* tcp hash entry ttl or undef */
+
+#ifdef CONFIG_NET_SCH_PSP_NO_TTL
+#undef TTL
+#else
+#define TTL (15*30*30*1000) /* tcp hash entry ttl or undef, msec */
+#endif
+
 /* SYN_WEIGHT: syn fairness */
 #ifdef CONFIG_NET_SCH_PSP_NO_SYN_FAIRNESS
 #undef SYN_WEIGHT
@@ -83,7 +90,6 @@
 #define SYN_WEIGHT (1) /* 1 syn == len<<SYN_WEIGHT retransmissions (or undef) */
 #endif
 
-#define ENCLOCK
 //#define HZ_ESTIMATOR /* define to estimate in update_clocks(). undef-timer */
 
 //#define gap_u64 /* I prefer undef for 32bit and normal gaps */
@@ -149,6 +155,9 @@ struct __node {
 typedef struct __node **node;
 
 struct hashitem {
+#ifdef TTL
+    struct list_head tcplist;
+#endif
 //    u16 seq;
     int v[NODEVAL];
 #ifdef CONFIG_IPV6
@@ -194,9 +203,6 @@ struct hashitem {
 	};
     };
     u64 clock;
-#ifdef TTL
-    struct hashitem *prev,*next;
-#endif
 #ifdef CONFIG_IPV6
     u8 asize;
 #endif
@@ -262,7 +268,7 @@ struct psp_class
 
 	void *tcphash;			/* tcp "tracking" hash */
 #ifdef TTL
-	struct hashitem *tcptail,*tcphead;
+	struct list_head tcplist;
 #endif
 	struct __node *iptree;		/* ip address tree */
 #ifdef CONFIG_IPV6
@@ -316,11 +322,12 @@ struct psp_sched_data
 	unsigned long default_rate;		/* default_rate */
 	unsigned int mtu;			/* interface MTU size
 						   (included ethernet heaer) */
+#ifdef TTL
+	u32 ttl;
+#endif
 #define MTU(sch) (qdisc_dev(sch)->mtu+qdisc_dev(sch)->hard_header_len)
 	u64 clock;				/* wall clock */
-#ifdef ENCLOCK
 	u64 clock0;
-#endif
 
 	struct sk_buff *gap;			/* template of gap packets */
 	struct tc_psp_xstats xstats;		/* psp specific stats */
@@ -822,6 +829,7 @@ static void estimate_target_rate(struct sk_buff *skb, struct Qdisc *sch,
 	cl->rate = cp->rate;
 }
 
+
 /*
  * update byte clocks
  * when a packet is sent out:
@@ -834,55 +842,39 @@ static clock_delta update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			    struct psp_class *cl, int len, unsigned long *hw_gap)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
-	clock_delta gapsize = 0, gapsize1, len2=HW_GAP(q)+FCS;
-	unsigned long p_rate; /* parent's rate */
+	clock_delta gapsize = 0, gapsize1;
+	unsigned long p_rate;
 
 #ifdef HZ_ESTIMATOR
 	if(jiffies != cl->est_timer)
 	    psp_class_est(cl,min_t(unsigned long,NEXT(unsigned long,cl->est_timer,jiffies),est_ewma));
 #endif
 
-	if (cl == NULL) { 
-		/* update qdisc clock */
-		/* gap packet */
-		*hw_gap += len2;
-#ifdef ENCLOCK
-		q->clock0 =
-#endif
-		q->clock += len + *hw_gap;
-		return *hw_gap;
-	}
-
 	if (cl->parent) {
 	    /* recursion: update parent's clock */
-	    gapsize1 = update_clocks(skb, sch, cl->parent, len, hw_gap);
-	    p_rate=cl->parent->rate;
+	    gapsize1=update_clocks(skb, sch, cl->parent, len, hw_gap);
 #ifdef SKB_BACKSIZE
-	    if(cl->state & TC_PSP_MODE_TCP) {
-		if(!SKB_BACKSIZE(skb)) goto gap0;
+	    if((cl->state & TC_PSP_MODE_TCP)) {
+		if(!SKB_BACKSIZE(skb)) goto len0;
 		len=SKB_BACKSIZE(skb);
 	    }
 #endif
+	    p_rate=cl->parent->rate;
 	}else{
 	    /* update qdisc clock */
 	    /* data packet */
 	    /* first gap - hardware */
-#ifdef ENCLOCK
-	    q->clock0 =
-#endif
-	    q->clock += len + (gapsize1 = len2);
-	    p_rate=q->max_rate;
+	    q->clock0 = q->clock += len + (gapsize1 = HW_GAP(q)+FCS);
+	    *hw_gap = HW_CUT_GAP(gapsize1);
 #ifdef SKB_BACKSIZE
-	    if(cl->state & TC_PSP_MODE_TCP) {
-		if(!SKB_BACKSIZE(skb)) {
-		    *hw_gap += HW_CUT_GAP(gapsize1);
-		    goto gap0;
-		}
+	    if((cl->state & TC_PSP_MODE_TCP)) {
+		if(!SKB_BACKSIZE(skb))
+		    goto len0;
 		len=SKB_BACKSIZE(skb);
-		gapsize1 = DIV_ROUND_UP(len,q->mtu)*len2;
+		*hw_gap = HW_CUT_GAP(gapsize1 *= DIV_ROUND_UP(len,q->mtu));
 	    }
 #endif
-	    *hw_gap += HW_CUT_GAP(gapsize1);
+	    p_rate=q->max_rate;
 	}
 
 	/* recalculate gapsize */
@@ -917,7 +909,7 @@ static clock_delta update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	    gapsize -= gapsize<len?gapsize:len;
 	}
 #endif
-gap0:
+len0:
 	*hw_gap += cl->hw_gap;
 	gapsize += gapsize1 + cl->hw_gap;
 	/* update class clock */
@@ -1380,12 +1372,6 @@ static inline int retrans_check(struct sk_buff* skb, struct psp_class *cl,struct
     aseq=be32_to_cpu(TH->ack_seq);
 //    y=tohash(jhash(th+4,10,x));
     h=tcphash_get(cl->tcphash,tohash(x));
-#ifdef TTL
-    if(h->next) h->next->prev=h->prev;
-    else cl->tcphead=h->prev;
-    if(h->prev) h->prev->next=h->next;
-    else cl->tcptail=h->next;
-#endif
 #ifdef SYN_WEIGHT
     if(TH->syn){
 	/* slowdown syn */
@@ -1470,7 +1456,13 @@ tcp_fast:
     /* change hashed connection to new */
     if(cl->state&TC_PSP_MODE_RETRANS_DST) tree_del(iptree,&h->daddr,asz<<3,h->v[0],h->v[1]);
     if(cl->state&TC_PSP_MODE_RETRANS_SRC) tree_del(iptree,&h->saddr,asz<<3,h->v[0],h->v[1]);
+#ifdef TTL
+    if(h->tcplist.next) list_del(&h->tcplist);
+#endif
     memset(h,0,sizeof(struct hashitem));
+#ifdef TTL
+    INIT_LIST_HEAD(&h->tcplist);
+#endif
 //  h->seq=y;
     memcpy(&h->saddr,saddr,asz<<1);
     h->ports=*(u32*)th;
@@ -1496,9 +1488,7 @@ next_pkt:
     h->end+=skb->len-hdr_size-(TH->doff<<2)+TH->syn+TH->fin;
 continue_connection:
 #ifdef TTL
-    h->next=NULL;
-    if((h->prev=cl->tcphead)) h->prev->next=h;
-    cl->tcphead=h;
+    list_move_tail(&h->tcplist,&cl->tcplist);
 #endif
     h->v[res]+=len;
     if(cl->state&(TC_PSP_MODE_RETRANS_SRC|TC_PSP_MODE_RETRANS_DST))
@@ -1511,12 +1501,11 @@ continue_connection:
     if(early) psp_tstamp(skb)=(psp_tstamp(skb)+early)>>1;
 //    if(gap) printk(KERN_DEBUG "mode=%x len=%i gap=%i leaf=%s\n",cl->state,skb->len,gap,cl->qdisc->ops->id);
 #ifdef TTL
-    if((h=cl->tcptail) && cl->clock>h->clock+TTL){
+    if((!list_empty(&cl->tcplist)) && cl->clock>(h=(struct hashitem *)cl->tcplist.next)->clock+q->ttl) {
 #ifdef CONFIG_IPV6
 	asz=h->asize;
 #endif
-	if((cl->tcptail=h->next)) h->next->prev=NULL;
-	else cl->tcphead=NULL;
+	list_del(&h->tcplist);
 	if(cl->state&TC_PSP_MODE_RETRANS_DST) tree_del(iptree,&h->daddr,asz<<3,h->v[0],h->v[1]);
 	if(cl->state&TC_PSP_MODE_RETRANS_SRC) tree_del(iptree,&h->saddr,asz<<3,h->v[0],h->v[1]);
 	memset(h,0,sizeof(struct hashitem));
@@ -1604,12 +1593,8 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 #ifdef SKB_BACKSIZE
 		SKB_BACKSIZE(skb)=0;
 #endif
-#ifdef ENCLOCK
 //		q->clock0=(psp_tstamp(skb)=max_t(u64,q->clock0,q->clock))+len;
 		q->clock0=(psp_tstamp(skb)=q->clock0)+len+HW_GAP(q)+FCS;
-#else
-		psp_tstamp(skb)=q->clock;
-#endif
 		for(cl1=cl; cl1; cl1=cl1->parent){
 		    if(cl1->state & TC_PSP_MODE_RETRANS){
 			retrans_check(skb,cl1,q);
@@ -1703,7 +1688,7 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl=NULL;
 	clock_delta gapsize;
-	unsigned long hw = 0;
+	unsigned long hw;
 	
 	q->mtu=MTU(sch);
 
@@ -1761,11 +1746,11 @@ lookup:
 			}
 		}
 		sch->q.qlen--;
-		gapsize=skb->len;
-		goto update_clocks;
+		update_clocks(skb, sch, cl, skb->len, &hw);
+		return skb;
 	}
 	/* per-packet gap on interface */
-	gapsize -= min_t(unsigned long, gapsize, hw += q->hw_gap);
+	gapsize -= min_t(unsigned long, gapsize, q->hw_gap);
 	/* clone a gap packet */
 	gapsize = max_t(int, gapsize, sizeof(struct gaphdr));
 	skb = skb_clone(q->gap, GFP_ATOMIC);
@@ -1776,8 +1761,8 @@ lookup:
 	skb_trim(skb, gapsize);
 	q->xstats.bytes += gapsize;
 	q->xstats.packets++;
- update_clocks:
-	update_clocks(skb, sch, cl, gapsize, &hw);
+	/* ex-update_clocks() */
+	q->clock0=q->clock+=gapsize+q->hw_gap+HW_GAP(q)+FCS;
 	return skb;
 }
 
@@ -1873,6 +1858,7 @@ static int psp_change(struct Qdisc *sch, struct nlattr *opt)
 		q->default_rate = q->max_rate = qopt->rate;
 	else
 		q->default_rate = q->max_rate = _phy_rate(sch);
+	q->ttl=mul_div(TTL,q->max_rate,MSEC_PER_SEC);
 	sch_tree_unlock(sch);
 
 	return 0;
@@ -2220,6 +2206,9 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 		INIT_LIST_HEAD(&cl->plist);
 		INIT_LIST_HEAD(&cl->elist);
 		INIT_LIST_HEAD(&cl->conn);
+#ifdef TTL
+		INIT_LIST_HEAD(&cl->tcplist);
+#endif
 
 		new_q = q_create_dflt(sch,classid);
 		sch_tree_lock(sch);

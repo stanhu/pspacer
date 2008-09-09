@@ -33,3 +33,9 @@ config NET_SCH_PSP_NO_SYN_FAIRNESS
 	 
 	 Say N to possible solve native SYN-storms/peaks or attacks.
 	 Possible (unsure) say Y with PKT_GAP feature.
+
+config NET_SCH_PSP_NO_TTL
+	bool "Disable TCP track expiration"
+	depends on NET_SCH_PSP
+	---help---
+	 Say Y to clean TCP tracking entry only by hash collision
