@@ -38,4 +38,4 @@ config NET_SCH_PSP_NO_TTL
 	bool "Disable TCP track expiration"
 	depends on NET_SCH_PSP
 	---help---
-	 Say Y to clean TCP tracking entry only by hash collision
+	 Say Y to clean TCP tracking entry only by hash collision.
