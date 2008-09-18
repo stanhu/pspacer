@@ -15,7 +15,7 @@ config NET_SCH_PSP_PKT_GAP
 	 gaps/delay, based on TCP/IP tracking. Say N to use individual
 	 packet clocks only to sorting packets in PFIFO or SFQ leaf queue
 	 and delay only on busy queue.
-	 
+
 	 To allow minimal packet delay, faster delivering and maximal channel
 	 filling say N. To trying minimize packet lost if you believe to
 	 algorithms ;) - say Y.
@@ -27,15 +27,31 @@ config NET_SCH_PSP_NO_SYN_FAIRNESS
 	 Say N to SYN-fairness add-ons to PSP tracking code.
 	 Say Y to disable this and produce more precise statistics
 	 to automatic traffic tuning.
-	 
+
 	 This code count SYN partially as retransmission packet and slow down
 	 related connection and nearest IP-tree area.
-	 
+
 	 Say N to possible solve native SYN-storms/peaks or attacks.
 	 Possible (unsure) say Y with PKT_GAP feature.
 
-config NET_SCH_PSP_NO_TTL
-	bool "Disable TCP track expiration"
+config NET_SCH_PSP_EST
+	bool "Enable rate estimators"
 	depends on NET_SCH_PSP
 	---help---
-	 Say Y to clean TCP tracking entry only by hash collision.
+	 Say Y to estimate rate for psp qdisc and every class.
+	 Additional code will be used per every packet.
+
+	 Say Y to use: "tc qdisc ... psp rate auto [ewma 5]"
+
+config NET_SCH_PSP_RRR
+	bool "Enable Retransmission-Round-Robin"
+	depends on NET_SCH_PSP
+	select NET_ACT_PEDIT
+	---help---
+	 Say Y to enable experemental RRR (Retransmission-Round-Robin) feature.
+	 Additional data field will be added into TCP hash and IP tree items
+	 and nodes.
+
+	 Say Y to trying to distribute traffic across multiple outgoing
+	 channels by TCP retransmissions. Also use packet editing to change
+	 destination MACs on leaf.

@@ -23,6 +23,7 @@
 
 struct tc_psp_copt
 {
+	__u32	chk;		/* length of tc_psp_copt to version verify */
 	__u32	level;
 	__u32	mode;
 #define TC_PSP_MODE_NORMAL	(0)
@@ -37,24 +38,28 @@ struct tc_psp_copt
 #define TC_PSP_MODE_RETRANS_DST (0x100)
 #define TC_PSP_MODE_RETRANS_SRC	(0x200)
 #define TC_PSP_MODE_RETRANS_FAST	(0x400)
-#define TC_PSP_MODE_TCP	(0x800)
+#define TC_PSP_MODE_TCP		(0x800)
 #define TC_PSP_MAJ_MODE_MASK	(0x000000FFU)
 #define TC_PSP_MIN_MODE_MASK	(0x0000FF00U)
 	__u32	rate;		/* bytes/sec */
 	__u32	hw_gap;		/* ethernet: ifg+preamble+FCS (0 - software) */
 	__u32	back_dev;	/* interactive: back class device */
 	__u32	back_id;	/* interactive: back class id */
+	__u32	weight;		/* class weight for RRR */
+	__u32	rrr;		/* master class index */
+	__u32	ewma;		/* rate estimator EWMA */
 };
 
 struct tc_psp_qopt
 {
+	__u32	chk;		/* length of tc_psp_qopt to version verify */
 	__u32	defcls;
 	__u32	rate;		/* bytes/sec */
 	__u32	direct_pkts;
 	__u32	ifg;
 	__u32	est_min;
 	__u32	est_max;
-	__u32	est_ewma;
+	__u32	ewma;
 };
 
 struct tc_psp_xstats
