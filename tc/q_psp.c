@@ -46,6 +46,7 @@ static void explain(void)
 " rate     physical interface bandwidth\n"
 " ifg      inter frame gap size\n"
 " psp-est  rate estimator(s) parameters (random interval MIN..MAX, TIME=ewma)\n"
+" ewma     rate estimator EWMA\n"
 "\n... class add ... psp mode M [ rate MBPS ] [hw GAP] [back DEVICE CLASSID]\n"
 " mode     target rate estimation method (NORMAL=%x STATIC=%x DYNAMIC=%x) {0}\n"
 "          ESTIMATED=%x ESTIMATED_GAP=%x ESTIMATED_DATA=%x ESTIMATED_GAP_DATA=%x\n"
@@ -57,7 +58,10 @@ static void explain(void)
 "          +0x%x tcp backrate (by window vs. length), use under retransmit mode\n"
 " rate     rate allocated to this class\n"
 " hw       0 or destination ethernet hardware gap: ifg+preamble+FCS\n"
-" back     back-direction psp device and classid (for interactive mode)\n",
+" back     back-direction psp device and classid (for ESTIMATED_INTERACTIVE)\n"
+" rrr      minor id of master class for retransmission-round-robin\n"
+" weight   class weight for retransmission-round-robin\n"
+" ewma     rate estimator EWMA\n",
 	TC_PSP_MODE_NORMAL, TC_PSP_MODE_STATIC, TC_PSP_MODE_DYNAMIC,
 	TC_PSP_MODE_ESTIMATED, TC_PSP_MODE_ESTIMATED_GAP, TC_PSP_MODE_ESTIMATED_DATA, TC_PSP_MODE_ESTIMATED_GAP_DATA,
 	TC_PSP_MODE_ESTIMATED_INTERACTIVE,
@@ -89,12 +93,15 @@ static int psp_parse_opt(struct qdisc_util *qu, int argc, char **argv,
 	struct rtattr *tail;
 
 	memset(&qopt, 0, sizeof(qopt));
+	qopt.chk = sizeof(qopt);
 	qopt.ifg = 12;
 
 	while (argc > 0) {
 		if (matches(*argv, "rate") == 0) {
 			NEXT_ARG();
-			if (GET_RATE(&qopt.rate, *argv)) {
+			if (matches(*argv, "auto") == 0)
+				qopt.rate=1;
+			else if (GET_RATE(&qopt.rate, *argv)) {
 				explain1("rate");
 				return -1;
 			}
@@ -110,6 +117,12 @@ static int psp_parse_opt(struct qdisc_util *qu, int argc, char **argv,
 				explain1("ifg");
 				return -1;
 			}
+		} else if (matches(*argv, "ewma") == 0) {
+			NEXT_ARG();
+			if (get_u32(&qopt.ewma, *argv, 16)) {
+				explain1("ewma");
+				return -1;
+			}
 		} else if (matches(*argv, "psp-est") == 0) {
 			NEXT_ARG();
 			if (_get_usecs(&qopt.est_min, *argv)) {
@@ -122,12 +135,12 @@ static int psp_parse_opt(struct qdisc_util *qu, int argc, char **argv,
 				return -1;
 			}
 			NEXT_ARG();
-			if (_get_usecs(&qopt.est_ewma, *argv)) {
+			if (_get_usecs(&qopt.ewma, *argv)) {
 				explain1("psp-est");
 				return -1;
 			}
 			if(qopt.est_min<=0 || qopt.est_max<qopt.est_min
-			    || qopt.est_max<qopt.est_ewma) {
+			    || qopt.est_max<qopt.ewma) {
 				explain1("psp-est");
 				return -1;
 			}			    
@@ -224,13 +237,16 @@ static int psp_parse_class_opt(struct qdisc_util *qu, int argc, char **argv,
 	char d[16];
 
 	memset(&copt, 0, sizeof(copt));
+	copt.chk = sizeof(copt);
 	copt.mode = TC_PSP_MODE_STATIC; /* default mode */
 	memset(&d, 0, sizeof(d));
 
 	while (argc > 0) {
 		if (matches(*argv, "rate") == 0) {
 			NEXT_ARG();
-			if (GET_RATE(&copt.rate, *argv)) {
+			if (matches(*argv, "auto") == 0)
+				copt.rate=1;
+			else if (GET_RATE(&copt.rate, *argv)) {
 				explain1("rate");
 				return -1;
 			}
@@ -256,6 +272,24 @@ static int psp_parse_class_opt(struct qdisc_util *qu, int argc, char **argv,
 			NEXT_ARG();
 			if (get_tc_classid(&copt.back_id, *argv))
 			    invarg(*argv, "invalid class ID");
+		} else if (matches(*argv, "rrr") == 0) {
+			NEXT_ARG();
+			if (get_u32(&copt.rrr, *argv, 16)) {
+				explain1("rrr");
+				return -1;
+			}
+		} else if (matches(*argv, "weight") == 0) {
+			NEXT_ARG();
+			if (get_u32(&copt.weight, *argv, 16)) {
+				explain1("weight");
+				return -1;
+			}
+		} else if (matches(*argv, "ewma") == 0) {
+			NEXT_ARG();
+			if (get_u32(&copt.ewma, *argv, 16)) {
+				explain1("ewma");
+				return -1;
+			}
 		} else if (matches(*argv, "help") == 0) {
 			explain();
 			return -1;
