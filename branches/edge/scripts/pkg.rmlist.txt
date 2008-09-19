@@ -1,4 +1,0 @@
-scripts/pkgutils.pyc
-scripts/test
-iproute2
-libnl-1.0-pre6

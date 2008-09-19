@@ -1,8 +1,0 @@
-config NET_SCH_PSP
-	tristate "Precise Software Pacer (PSP)"
-	---help---
-	  Say Y here if you want to include PSPacer module, which means
-	  that you will be able to control precise pacing.
-
-	  To compile this driver as a module, choose M here: the
-	  module will be called sch_psp.
