@@ -1,0 +1,43 @@
+#
+# Copyright (C) 2004-2007 National Institute of Advanced Industrial
+# Science and Technology (AIST), Japan.
+# 
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version
+# 2 of the License, or (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software Foundation,
+# Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+#
+MANDIR		:= $(DESTDIR)/usr/share/man
+TEMP		:= /tmp/tc-psp.8
+EUC2UTF8	:= iconv -f euc-jp	# or "nkf -w"
+
+INSTALL		:= @INSTALL@
+INSTALL_PROGRAM	:= @INSTALL_PROGRAM@
+INSTALL_SCRIPT	:= @INSTALL_SCRIPT@
+INSTALL_DATA	:= @INSTALL_DATA@
+
+all:
+
+install:
+	test -d $(MANDIR)/man8 || mkdir -p $(MANDIR)/man8
+	$(INSTALL_DATA) man8/tc-psp.8 $(MANDIR)/man8
+ifeq ($(LANG), ja_JP.UTF-8)
+	$(EUC2UTF8) ja/man8/tc-psp.8 > $(TEMP)
+	test -d $(MANDIR)/ja/man8 || mkdir -p $(MANDIR)/ja/man8
+	$(INSTALL_DATA) $(TEMP) $(MANDIR)/ja/man8
+	rm $(TEMP)
+endif
+ifeq ($(LANG), ja_JP.eucJP)
+	test -d $(MANDIR)/ja/man8 || mkdir -p $(MANDIR)/ja/man8
+	$(INSTALL_DATA) ja/man8/tc-psp.8
+	$(MANDIR)/ja/man8
+endif

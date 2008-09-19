@@ -1,0 +1,100 @@
+#
+# Copyright (C) 2004-2008 National Institute of Advanced Industrial
+# Science and Technology (AIST), Japan.
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version
+# 2 of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software Foundation,
+# Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
+#
+PACKAGE		:= @PACKAGE_STRING@
+KERNELRELEASE	:= $(shell uname -r)
+IPROUTE2	:= @IPROUTE2@
+IPROUTE2_SRC	:= @IPROUTE2_SRC@
+LIBNL		:= @LIBNL@
+LIBNL_SRC	:= @LIBNL_SRC@
+
+INSTALL		:= @INSTALL@
+INSTALL_PROGRAM	:= @INSTALL_PROGRAM@
+INSTALL_SCRIPT	:= @INSTALL_SCRIPT@
+INSTALL_DATA	:= @INSTALL_DATA@
+
+all:
+	$(MAKE) -C kernel
+ifeq ($(IPROUTE2), yes)
+	$(MAKE) -C tc
+endif
+ifeq ($(LIBNL), yes)
+	$(MAKE) -C $(LIBNL_SRC)
+	$(MAKE) -C pspd
+endif
+
+docs:
+	$(MAKE) -C doc
+
+install:
+	$(MAKE) -C kernel install DESTDIR=$(DESTDIR)
+ifeq ($(IPROUTE2), yes)
+	$(MAKE) -C tc install DESTDIR=$(DESTDIR)
+	$(MAKE) -C man install DESTDIR=$(DESTDIR)
+endif
+ifeq ($(LIBNL), yes)
+	$(MAKE) -C $(LIBNL_SRC) install DESTDIR=$(DESTDIR)
+	$(MAKE) -C pspd install DESTDIR=$(DESTDIR)
+endif
+
+docs-install:
+	$(MAKE) -C doc install DESTDIR=$(DESTDIR)
+
+dist:	distclean
+	(cd scripts; ./mkpkg.sh -o ../$(PACKAGE).tar.gz)
+
+clean:
+	$(MAKE) -C kernel clean
+ifeq ($(IPROUTE2), yes)
+	$(MAKE) -C tc clean
+endif
+ifeq ($(LIBNL), yes)
+	$(MAKE) -C $(LIBNL_SRC) clean
+endif
+	$(MAKE) -C pspd clean
+	$(MAKE) -C doc clean
+	find  . -name "*~" | xargs rm -f
+	find  . -name ".#*" | xargs rm -f
+
+distclean: clean
+#ifeq ($(IPROUTE2), yes)
+#	rm -rf $(IPROUTE2_SRC)
+#endif
+#ifeq ($(LIBNL), yes)
+#	rm -rf $(LIBNL_SRC)
+#endif
+	find . -name "Makefile" | xargs rm -f
+	rm -f config.log config.options config.status
+	rm -rf autom*
+	rm -f README.en.html README.ja.html
+	rm -f $(PACKAGE).tar.gz
+
+deb-prepare:
+	sed s%_KVERS_%$(KERNELRELEASE)%g debian/control.in > debian/control
+	sed s%_KVERS_%$(KERNELRELEASE)%g debian/rules.in > debian/rules
+	chmod +x debian/rules
+
+deb: deb-prepare
+	dpkg-buildpackage -rfakeroot -us -uc -tc
+
+deb-clean:
+	rm -f debian/control
+	rm -f debian/rules
+	if [ -f ./build-stamp ]; then \
+		fakeroot debian/rules clean; \
+	fi
