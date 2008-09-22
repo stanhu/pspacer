@@ -10,9 +10,6 @@
  *		2 of the License, or (at your option) any later version.
  *
  * Authors:	TAKANO Ryousei, <takano-ryousei@aist.go.jp>
- *
- * Changes:
- * Denis Kaganovich, <mahatma@bspu.unibel.by> - fixes, retransmission/tcp/trees
  */
 
 #include <linux/version.h>
@@ -23,43 +20,22 @@
 
 struct tc_psp_copt
 {
-	__u32	chk;		/* length of tc_psp_copt to version verify */
 	__u32	level;
 	__u32	mode;
 #define TC_PSP_MODE_NORMAL	(0)
 #define TC_PSP_MODE_STATIC	(1)
 #define TC_PSP_MODE_DYNAMIC	(2)
-#define TC_PSP_MODE_ESTIMATED	(3)
-#define TC_PSP_MODE_ESTIMATED_GAP	(4)
-#define TC_PSP_MODE_ESTIMATED_DATA	(5)
-#define TC_PSP_MODE_ESTIMATED_GAP_DATA	(6)
-#define TC_PSP_MODE_ESTIMATED_INTERACTIVE	(7)
-#define TC_PSP_MODE_RETRANS	(0x700)
-#define TC_PSP_MODE_RETRANS_DST (0x100)
-#define TC_PSP_MODE_RETRANS_SRC	(0x200)
-#define TC_PSP_MODE_RETRANS_FAST	(0x400)
-#define TC_PSP_MODE_TCP		(0x800)
 #define TC_PSP_MAJ_MODE_MASK	(0x000000FFU)
 #define TC_PSP_MIN_MODE_MASK	(0x0000FF00U)
 	__u32	rate;		/* bytes/sec */
-	__u32	hw_gap;		/* ethernet: ifg+preamble+FCS (0 - software) */
-	__u32	back_dev;	/* interactive: back class device */
-	__u32	back_id;	/* interactive: back class id */
-	__u32	weight;		/* class weight for RRR */
-	__u32	rrr;		/* master class index */
-	__u32	ewma;		/* rate estimator EWMA */
 };
 
 struct tc_psp_qopt
 {
-	__u32	chk;		/* length of tc_psp_qopt to version verify */
 	__u32	defcls;
 	__u32	rate;		/* bytes/sec */
 	__u32	direct_pkts;
 	__u32	ifg;
-	__u32	est_min;
-	__u32	est_max;
-	__u32	ewma;
 };
 
 struct tc_psp_xstats
@@ -97,6 +73,7 @@ static inline void *qdisc_priv(struct Qdisc *q)
 	return (void *)q->data;
 }
 #endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,10)
 #define QSTATS(x) (x)->stats
 #define BSTATS(x) (x)->stats
@@ -129,27 +106,23 @@ skb_set_timestamp(struct sk_buff *skb, const struct timeval *stamp)
 #define tcp_hdr(skb) ((skb)->h.th)
 #endif
 
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,26)
-#define qdisc_dev(sch) ((sch)->dev)
-#endif
-
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,25)
 #define nlattr rtattr
-#define nla_parse(tb,max,head,len,policy) \
-	rtattr_parse(tb,max,head,len)
-#define nla_parse_nested(tb,max,nla,policy) \
-	rtattr_parse_nested(tb,max,nla)
+#define nla_parse(tb, max, head, len, policy) \
+	rtattr_parse(tb, max, head, len)
+#define nla_parse_nested(tb, max, nla, policy) \
+	rtattr_parse_nested(tb, max, nla)
 #define nla_len(x) RTA_PAYLOAD(x)
 #define nla_data(x) RTA_DATA(x)
-#define NLA_PUT(skb,type,len,data) RTA_PUT(skb,type,len,data)
+#define NLA_PUT(skb, type, len, data) RTA_PUT(skb, type, len, data)
 #define nla_put_failure rtattr_failure
 #define nla_nest_end(skb,nla) \
 	nla->rta_len = skb_tail_pointer(skb) - b
 #define nla_nest_start(skb,opt) \
 	(struct nlattr *)b; NLA_PUT((skb), (opt), 0, NULL)
 #define nla_nest_cancel(skb, nla) \
-	skb_trim((skb), skb_tail_pointer(skb) - (skb)->data)
-#define _OPT(x) ((x)-1)
+	skb_trim((skb), b - (skb)->data)
+#define _OPT(x) ((x) - 1)
 #else
 #define _OPT(x) (x)
 #endif
