@@ -10,9 +10,6 @@
  *		2 of the License, or (at your option) any later version.
  *
  * Authors:	Ryousei Takano, <takano-ryousei@aist.go.jp>
- *
- * Changes:
- * Denis Kaganovich, <mahatma@bspu.unibel.by> - fixes, retransmission/tcp/trees
  */
 
 #include <linux/module.h>
@@ -28,13 +25,6 @@
 #include <linux/tcp.h>
 #include <net/pkt_sched.h>
 #include <asm/div64.h>
-
-#include <linux/random.h>
-#include <net/ip.h>
-#include <linux/jhash.h>
-#ifdef CONFIG_IPV6
-#include <linux/ipv6.h>
-#endif
 
 #include "sch_psp.h"
 
@@ -63,61 +53,10 @@
  */
 
 #define FCS    (4)		/* Frame Check Sequence(4) */
+#define MIN_GAP (64)		/* Minimum size of gap packet */
 #define MIN_TARGET_RATE (1000)	/* 1 KBytes/sec */
 
-//#define CONFIG_NET_SCH_PSP_PKT_GAP
-//#define CONFIG_NET_SCH_PSP_NO_SYN_FAIRNESS
-//#define CONFIG_NET_SCH_PSP_NO_TTL
-//#define CONFIG_NET_SCH_PSP_RRR
-//#define CONFIG_NET_SCH_PSP_EST
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 #define PSP_HSIZE (16)
-#else
-#define PSP_HSIZE q->clhash.hashsize
-#endif
-
-#define ENABLE_PSP_DIRECT
-
-#ifdef CONFIG_NET_SCH_PSP_NO_TTL
-#undef TTL
-#else
-#define TTL (15*30*30*1000) /* tcp hash entry ttl or undef, msec */
-#endif
-
-/* SYN_WEIGHT: syn fairness */
-#ifdef CONFIG_NET_SCH_PSP_NO_SYN_FAIRNESS
-#undef SYN_WEIGHT
-#else
-#define SYN_WEIGHT (1) /* 1 syn == len<<SYN_WEIGHT retransmissions (or undef) */
-#endif
-
-#define EST_QUALITY (440) /* average: 4x100/n where n */
-#define EWMA_DEFAULT (3)
-
-//#define gap_u64 /* I prefer undef for 32bit and normal gaps */
-
-#define STRICT_TCP /* safer but slower for multihomed link + variable window */
-
-#ifdef gap_u64
-typedef u64 clock_delta;
-#else
-typedef unsigned long clock_delta;
-#endif
-
-#if 1
-/* IMHO, but vs. original */
-#define HW_ADD 0
-#define HW_CUT_GAP(hw) (hw)
-#else
-/* original ("base = len + FCS") */
-#define HW_ADD FCS
-#define HW_CUT_GAP(hw) ((hw)-HW_GAP(q))
-#endif
-
-//#define psp_tstamp(skb) (*(u64*)&(skb)->tstamp)
-#define psp_tstamp(skb) (*(u64*)(&(skb)->cb[36]))
-#define SKB_BACKSIZE(skb) (*(u32*)(&(skb)->cb[44]))
 
 static int debug __read_mostly;
 module_param(debug, int, 0644);
@@ -127,9 +66,7 @@ MODULE_PARM_DESC(debug, "add the size to packet header for debugging (0|1)");
  * phy_rate is the maximum qdisc rate. If the kernel supports ethtool ioctl,
  * it is corrected. Otherwise it statically sets to the Gigabit rate.
  */
-unsigned long phy_rate = 125000000;
-
-u32 psp_rand = 0;
+u64 phy_rate = 125000000;
 
 struct conn
 {
@@ -140,109 +77,14 @@ struct conn
 	struct tcp_opt *tp;
 #endif
 	u32 max_seq;
-	unsigned long rate;
+	u64 rate;
 	int rtt;			/* RTT in msec */
 	int cwnd;
 };
 
-#define NODEVAL 2
-#define TREE_MAX 128
-struct __node {
-    struct __node *b[2];
-#if NODEVAL == 2
-    union{
-	u64 vv;
-	u32 v[NODEVAL];
-    };
-#else
-    u32 v[NODEVAL];
-#endif
-#ifdef CONFIG_NET_SCH_PSP_RRR
-    int rrr;
-#endif
-    u64 clock;
-};
-typedef struct __node **node;
-
-struct hashitem {
-#ifdef TTL
-    struct list_head tcplist;
-#endif
-#define HASH_ZERO (4*NODEVAL+12)
-    u32 v[NODEVAL];
-    u32 ack_seq;
-    u64 clock;
-#ifdef CONFIG_IPV6
-    union {
-	struct {struct in6_addr saddr6,daddr6;};
-#endif
-	struct {__be32 saddr,daddr;};
-#ifdef CONFIG_IPV6
-    };
-#endif
-    __u32 ports;
-    u32 seq,end;
-    union {
-	__u16 misc[3];
-	struct {
-#if defined(__LITTLE_ENDIAN_BITFIELD)
-	    __u16   res1:4,
-		doff:4,
-		fin:1,
-		syn:1,
-		rst:1,
-		psh:1,
-		ack:1,
-		urg:1,
-		ece:1,
-		cwr:1;
-#elif defined(__BIG_ENDIAN_BITFIELD)
-	__u16   doff:4,
-		res1:4,
-		cwr:1,
-		ece:1,
-		urg:1,
-		ack:1,
-		psh:1,
-		rst:1,
-		syn:1,
-		fin:1;
-#else
-#error  "Adjust your <asm/byteorder.h> defines"
-#endif
-	    __be16  window;
-	    __sum16 check;
-	};
-    };
-#ifdef CONFIG_IPV6
-    u8 asize;
-#endif
-#ifdef CONFIG_NET_SCH_PSP_RRR
-    int rrr;
-#endif
-};
-
-#define HBITS 16
-#define HSIZE (1ULL<<HBITS)
-
-struct est_data {
-    unsigned long av;
-    unsigned long rate;
-    unsigned long etime;
-    unsigned long edata;
-    u64 data;
-    u64 time;
-};
-
 struct psp_class
 {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 	u32 classid;			/* class id */
-#define class_id(cl) (cl)->classid
-#else
-	struct Qdisc_class_common common;
-#define class_id(cl) (cl)->common.classid
-#endif
 	int refcnt;			/* reference count */
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,10)
@@ -253,23 +95,17 @@ struct psp_class
 #endif
 	int level;			/* class level in hierarchy */
 	struct psp_class *parent;	/* parent class */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
-	struct list_head hlist;		/* hash list */
 	struct list_head sibling;	/* sibling classes */
 	struct list_head children;	/* child classes */
-#else
-	unsigned int children;
-#endif
 
 	struct Qdisc *qdisc;		/* leaf qdisc */
 
 	struct tcf_proto *filter_list;	/* filter list */
 	int filter_cnt;			/* filter count */
-	long hw_gap;			/* inter frame gap + preamble + FCS */
 
+	struct list_head hlist;		/* hash list */
 	struct list_head dlist;		/* drop list */
 	struct list_head plist;		/* normal/pacing class qdisc list */
-	struct list_head elist;		/* estimators */
 
 	u32 state;			/* reserved(8)|activity(8)|mode(16) */
 #define MODE_MASK       (0x0000ffff)
@@ -278,57 +114,25 @@ struct psp_class
 #define FLAG_ACTIVE     (0x00010000)	/*  the class has packets or not */
 #define FLAG_DMARK      (0x00020000)	/*  reset mark */
 
-	unsigned long rate;		/* current target rate (bytes/sec) */
-	unsigned long max_rate;		/* maximum target rate */
-	unsigned long allocated_rate;	/* allocated rate to children */
+	u64 rate;			/* current target rate (bytes/sec) */
+	u64 max_rate;			/* maximum target rate */
+	u64 allocated_rate;		/* allocated rate to children */
 	u64 clock;			/* class local byte clock */
 	long qtime;			/* sender-side queuing time (us) */
 
-	void *tcphash;			/* tcp "tracking" hash */
-#ifdef TTL
-	struct list_head tcplist;
-#endif
-	struct __node *iptree;		/* ip address tree */
-#ifdef CONFIG_IPV6
-	struct __node *ip6tree;		/* ip6 address tree */
-#endif
-	struct sk_buff *skb;		/* prefetched packet */
-
 	struct list_head conn;		/* connection list(for dynamic mode) */
-
-	struct est_data bps;		/* rate estimator data */
-	struct est_data pps;
-	struct Qdisc *sch;		/* master qdisc, for estimator */
-	struct psp_class *back;		/* for interactive estimation */
-	struct psp_class *forward;
-	int back_dev;
-	u32 back_id;
-	struct est_data back_bps;
-
-	u64 phaze_time;
-	u64 phaze_bytes;
-	unsigned int ewma;
-
-	struct list_head rlist;		/* retransmission round-robin */
-	int weight, weight_sum;
 };
 
 struct psp_sched_data
 {
 	int defcls;				/* default class id */
-	struct psp_class *defclass;		/* default class */
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 	struct list_head root;			/* root class list */
 	struct list_head hash[PSP_HSIZE];	/* class hash */
-#else
-	struct Qdisc_class_hash clhash;
-#endif
 	struct list_head drop_list;		/* active leaf class list (for
 						   dropping) */
 	struct list_head pacing_list;		/* gap leaf class list (in
 						   order of the gap size) */
 	struct list_head normal_list;		/* no gap leaf class list */
-	struct psp_class *mode3;		/* just hardware estimator */
 
 	struct sk_buff_head requeue;		/* requeued packet */
 	long direct_pkts;
@@ -337,87 +141,35 @@ struct psp_sched_data
 	int filter_cnt;				/* filter count */
 
 	u32 ifg;				/* inter frame gap */
-	unsigned long hw_gap;			/* estimated cpu over-gap */
 #define HW_GAP(q) (8 + ((q)->ifg))		/* preamble + IFG */
-	unsigned long max_rate;			/* physical rate */
-	unsigned long allocated_rate;		/* sum of allocated rate */
-	unsigned long default_rate;		/* default_rate */
+	u64 max_rate;				/* physical rate */
+	u64 allocated_rate;			/* sum of allocated rate */
 	unsigned int mtu;			/* interface MTU size
 						   (included ethernet heaer) */
-#ifdef TTL
-	u32 ttl;
-#endif
-#define MTU(sch) (qdisc_dev(sch)->mtu+qdisc_dev(sch)->hard_header_len)
 	u64 clock;				/* wall clock */
-	u64 clock0;
-
-	int phaze_idle;
-	u64 phaze_time;
-	unsigned int ewma;
-	struct est_data bps;		/* rate estimator data */
-	struct est_data pps;
-
-	struct est_data bps0;
 
 	struct sk_buff *gap;			/* template of gap packets */
 	struct tc_psp_xstats xstats;		/* psp specific stats */
 };
 
-/* A gap packet header (struct ethhdr + h_opcode). */
+/* A gap packet header (struct ethhdr + pause frame related stuff). */
 struct gaphdr {
 	unsigned char h_dest[ETH_ALEN];		/* destination eth addr */
 	unsigned char h_source[ETH_ALEN];	/* source eth addr */
 	__be16 h_proto;				/* MAC control */
 	__be16 h_opcode;			/* MAC control opcode */
 	__be16 h_param;				/* pause time */
-	union{
+	union {
 		__be16 h_len;			/* (NON STANDARD) It is used
 						   for debugging only. */
 		unsigned char reserved[42];	/* must be zero */
 	};
 } __attribute__((packed));
 
-/* random-period timer, msec * HZ /1000 */
-static int est_min = 50 * HZ / 1000;
-static int est_max = 200 * HZ / 1000;
-static int est_ewma = 3;
-static int etime = 1;
-static struct timer_list etimer;
-static struct list_head elist = {
-    .next = &elist,
-    .prev = &elist
-};
-
 /* The destination address must be specified as 01:80:c2:00:00:01. */
 static const unsigned char gap_dest[ETH_ALEN] = {0x01, 0x80, 0xc2, 0x00,
 						 0x00, 0x01};
 
-static inline u64 mul_div(const unsigned long x, const unsigned long y, const unsigned long z)
-{
-    u64 tmp=x;
-//    if(y==0) return 0;
-//    if((!(u64)0)/y<x) {
-//	do_div(tmp,z);
-//	tmp*=y;
-//    }else{
-	tmp*=y;
-	do_div(tmp,z);
-//    }
-    return tmp;
-}
-
-static inline struct Qdisc *q_create_dflt(struct Qdisc *sch, u32 classid)
-{
-return qdisc_create_dflt(qdisc_dev(sch),
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-    sch->dev_queue,
-#endif
-    &pfifo_qdisc_ops
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,20)
-    ,classid
-#endif
-);
-}
 
 static inline int is_tcp_packet(struct sk_buff* skb)
 {
@@ -442,9 +194,9 @@ static inline int is_gap_packet(struct sk_buff* skb)
 static struct sk_buff *alloc_gap_packet(struct Qdisc *sch, int size)
 {
 	struct sk_buff *skb;
-	struct net_device *dev = qdisc_dev(sch);
+	struct net_device *dev = sch->dev;
 	struct gaphdr *gap;
-//	int pause_time = 0;
+	int pause_time = 0;
 
 	skb = alloc_skb(size, GFP_KERNEL);
 	if (!skb)
@@ -464,89 +216,74 @@ static struct sk_buff *alloc_gap_packet(struct Qdisc *sch, int size)
 	memcpy(gap->h_source, dev->dev_addr, ETH_ALEN);
 	gap->h_proto = __constant_htons(ETH_P_PAUSE);
 	gap->h_opcode = __constant_htons(0x0001);
-//	gap->h_param = htons(pause_time);
+	gap->h_param = htons(pause_time);
 
-	skb->dev = qdisc_dev(sch);
+	skb->dev = sch->dev;
 	skb->protocol = __constant_htons(ETH_P_802_3);
 
 	return skb;
 }
 
-#ifdef ENABLE_PSP_DIRECT
+/*
+ * recalculate gapsize (ipg: inter packet gap)
+ *     ipg = (max_rate / target_rate - 1) * base
+ */
+static inline u64 recalc_gapsize(struct psp_sched_data *q,
+				 struct psp_class *cl, unsigned int len)
+{
+	unsigned int base = len + FCS;
+	u64 ipg;
+
+	if (cl->rate == 0) /* XXX */
+		return 0;
+
+	ipg = q->max_rate * base;
+	do_div(ipg, cl->rate);
+	ipg -= base;
+	if (ipg > HW_GAP(q))
+		return ipg - HW_GAP(q); /* gap between real/gap packets */
+
+	printk(KERN_WARNING "psp: ipg(%lld) is smaller than HW_GAP.\n", ipg);
+	return 0;
+}
+
 #define PSP_DIRECT (struct psp_class *)(-1)
-#else
-#define PSP_DIRECT NULL
-#endif
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 static inline unsigned int psp_hash(u32 h)
 {
 	h ^= h >> 8;
 	h ^= h >> 4;
 	return h & (PSP_HSIZE - 1);
 }
-#endif
 
 static inline struct psp_class *psp_find(u32 handle, struct Qdisc *sch)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 	struct psp_class *cl;
 
 	list_for_each_entry(cl, &q->hash[psp_hash(handle)], hlist) {
 		if (cl->classid == handle)
 			return cl;
 	}
-#else
-	struct Qdisc_class_common *clc;
-
-	if ((clc=qdisc_class_find(&q->clhash, handle)))
-		return container_of(clc, struct psp_class, common);
-#endif
 	return NULL;
 }
-
-static inline void bind_default(struct Qdisc *sch)
-{
-	struct psp_sched_data *q = qdisc_priv(sch);
-	struct psp_class *cl;
-	if(
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
-	    !q->root.next ||
-#else
-	    !q->clhash.hash ||
-#endif
-	    !(cl = psp_find(TC_H_MAKE(TC_H_MAJ(sch->handle), q->defcls), sch)) ||
-	    cl->level > 0)
-		cl=PSP_DIRECT;
-	q->defclass=cl;
-}
-
-#define classtrace 10
 
 static struct psp_class *psp_classify(struct sk_buff *skb, struct Qdisc *sch,
 				      int *qerr)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
-	struct psp_class *cl, *pcl = NULL, *cls[classtrace+2];
-	int ncl=0;
+	struct psp_class *cl;
 	struct tcf_result res;
 	struct tcf_proto *tcf;
 	int result;
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
-	*qerr = NET_XMIT_BYPASS;
-#else
-	*qerr = NET_XMIT_SUCCESS | __NET_XMIT_BYPASS;
-#endif
-
-	if (TC_H_MAJ(skb->priority ^ sch->handle) == 0) {
-	    if ((cl = psp_find(skb->priority, sch)) != NULL
-		&& cl->level == 0) {
-			return cl;
-	    } else if (skb->priority == sch->handle)
+	if (skb->priority == sch->handle)
 		return PSP_DIRECT;
-	}
+	if (TC_H_MAJ(skb->priority ^ sch->handle) == 0 &&
+	    (cl = psp_find(skb->priority, sch)) != NULL)
+		if (cl->level == 0)
+			return cl;
 
+	*qerr = NET_XMIT_BYPASS;
 	tcf = q->filter_list;
 	while (tcf && (result = tc_classify(skb, tcf, &res)) >= 0) {
 #ifdef CONFIG_NET_CLS_ACT
@@ -563,32 +300,21 @@ static struct psp_class *psp_classify(struct sk_buff *skb, struct Qdisc *sch,
 			cl = psp_find(res.classid, sch);
 			if (cl == NULL)
 				break; /* filter selected invalid classid */
-			if (res.classid == sch->handle)
-			    return PSP_DIRECT;
 		}
 
 		if (cl->level == 0)
 			return cl; /* hit leaf class */
-
-                /* loop? ;) */
-		if(pcl){
-		    struct psp_class *cl1;
-		    for(cl1=cl->parent; cl1!=NULL && pcl!=cl1; cl1=cl1->parent){}
-		    if(!cl1) { /* not child? check other */
-		     int i=0;
-		     while(i<ncl && cls[i]!=cl){i++;}
-		     if(i!=ncl || ncl>=classtrace) break;
-		     cls[ncl++] = cl;
-		    }
-		}
-		pcl=cl;
 
 		/* apply inner filter chain */
 		tcf = cl->filter_list;
 	}
 
 	/* classification failed, try default class */
-	return q->defclass;
+	cl = psp_find(TC_H_MAKE(TC_H_MAJ(sch->handle), q->defcls), sch);
+	if (cl == NULL || cl->level != 0)
+		return PSP_DIRECT;
+
+	return cl;
 }
 
 static inline void psp_activate(struct psp_sched_data *q, struct psp_class *cl)
@@ -604,177 +330,18 @@ static inline void psp_deactivate(struct psp_sched_data *q,
 	list_del_init(&cl->dlist);
 }
 
-static inline int deq(struct Qdisc *sch, struct psp_sched_data *q, struct psp_class *cl, int qlen)
-{
-	int res=0;
-
-	if(cl) {
-	    if(!(res=(QSTATS(cl).qlen-=qlen)))
-		psp_deactivate(q, cl);
-	    sch->q.qlen-=qlen;
-	    while((cl=cl->parent))
-		if(!(QSTATS(cl).qlen-=qlen))
-		    psp_deactivate(q, cl);
-	}
-	return res;
-}
-
-struct psp_class *psp_get_back(struct psp_class *cl)
-{
-    struct net_device *dev=dev_get_by_index(
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,25)
-    dev_net(qdisc_dev(cl->sch)),
-#endif
-	cl->back_dev);
-    struct Qdisc *sch2;
-    struct psp_class *back;
-
-    if(!dev)
-	return cl->back=NULL;
-#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,26)
-    sch2=dev->qdisc;
-#else
-    sch2=netdev_get_tx_queue(dev, 0)->qdisc;
-#endif
-    if(sch2 || sch2->ops != cl->sch->ops)
-	return cl->back=NULL;
-    back=psp_find(cl->back_id,sch2);
-    back->forward=cl;
-    cl->back=back;
-    return back;
-}
-
-/*
- * estimate class-related rates and rate-related values
- */
-#define NEXT(type,saved,val) ({type x=(val)-(saved); (saved)+=x; x;})
-#define RATE(r,time,val) ({ \
-    u64 d=(r).av*(u64)(est_ewma-1)+((r).rate=mul_div(NEXT(u64,(r).data,(val)),HZ,(time))); \
-    do_div(d,est_ewma); \
-    (r).av=d; })
-static inline void psp_class_est(struct psp_class *cl, unsigned long time)
-{
-    struct Qdisc *sch = cl->sch;
-    struct psp_sched_data *q = qdisc_priv(sch);
-    unsigned long rmin,rmax,rb,rp,rbb,rbmax;
-    int mtu;
-
-    switch (cl->state & MAJOR_MODE_MASK) {
-    case TC_PSP_MODE_ESTIMATED_GAP_DATA:
-	rb = RATE(cl->bps,time,BSTATS(sch).bytes+q->xstats.bytes);
-	rp = RATE(cl->pps,time,BSTATS(cl).packets);
-	mtu = q->mtu;
-	rmax = q->max_rate;
-	break;
-    case TC_PSP_MODE_ESTIMATED:
-	/* q->clock are corrected by this mode */
-	rb = RATE(cl->bps,time,
-	    BSTATS(sch).bytes+q->xstats.bytes
-	    +(BSTATS(sch).packets+q->xstats.packets)*(HW_GAP(q)+FCS));
-	rp = RATE(cl->pps,time,BSTATS(sch).packets+q->xstats.packets);
-	mtu = q->mtu;
-	rmax = q->max_rate;
-	break;
-    case TC_PSP_MODE_ESTIMATED_DATA:
-    case TC_PSP_MODE_ESTIMATED_GAP:
-	rb = RATE(cl->bps,time,q->clock);
-	rp = RATE(cl->pps,time,BSTATS(sch).packets+q->xstats.packets);
-	mtu = q->mtu;
-	rmax = q->max_rate;
-	break;
-    case TC_PSP_MODE_ESTIMATED_INTERACTIVE:
-	/* estimate back traffic class rate */
-	rbmax=rbb=0;
-	if(cl->back || psp_get_back(cl)){
-	    rbb=RATE(cl->back_bps,time,BSTATS(cl->back).bytes);
-	    rbmax=cl->back->max_rate;
-	}
-	/* fall default */
-    default:
-	rb=RATE(cl->bps,time,BSTATS(cl).bytes);
-	rp=RATE(cl->pps,time,BSTATS(cl).packets);
-	mtu = qdisc_dev(sch)->mtu;
-	rmax = cl->parent?cl->parent->max_rate:q->max_rate;
-	break;
-    }
-    
-    if(rb>rmax) {
-	rb=rmax;
-	rp=min_t(unsigned long,rp,rmax/mtu);
-    }else if(rb<(rmin=max_t(unsigned long,cl->allocated_rate,cl->max_rate))){
-	rb=rmin;
-	rp=max_t(unsigned long,rp,rmin/mtu);
-    }
-    rp=rp? : 1;
-    switch (cl->state & MAJOR_MODE_MASK) {
-    case TC_PSP_MODE_ESTIMATED_GAP_DATA:
-	cl->hw_gap=max_t(long,((long)(rmax-rb)/rp)-HW_GAP(q)-FCS,0);
-	break;
-    case TC_PSP_MODE_ESTIMATED_GAP:
-	cl->hw_gap=q->hw_gap=max_t(long,((long)(rmax-rb)/rp)-HW_GAP(q)-FCS,0);
-	break;
-    case TC_PSP_MODE_ESTIMATED:
-    case TC_PSP_MODE_ESTIMATED_DATA:
-	break;
-    case TC_PSP_MODE_ESTIMATED_INTERACTIVE:
-	rb=rbb?mul_div(rbmax,min(rb,cl->rate),rbb):rmax;
-	break;
-    default:
-	break;
-    }
-    cl->rate=rb;
-}
-
-static void psp_estimator(unsigned long arg)
-{
-    struct psp_class *cl;
-    unsigned long time = min_t(unsigned long,etime,est_ewma);
-
-    list_for_each_entry(cl, &elist, elist)
-	psp_class_est(cl,time);
-    mod_timer(&etimer,jiffies + (etime=random32()%(est_max-est_min) + est_min));
-}
-
-static void est_add(struct psp_class *cl)
-{
-#ifndef CONFIG_NET_SCH_PSP_EST
-    if(!list_empty(&cl->elist))
-	return;
-    if(list_empty(&elist)){
-	etime=1;
-	setup_timer(&etimer, &psp_estimator, 1);
-	psp_estimator(1);
-    }
-    list_add_tail(&cl->elist,&elist);
-#endif
-}
-
-static void est_del(struct psp_class *cl)
-{
-    if(list_empty(&cl->elist))
-	return;
-    list_del(&cl->elist);
-    if(list_empty(&elist))
-	del_timer(&etimer);
-}
-
 static void add_leaf_class(struct psp_sched_data *q, struct psp_class *cl)
 {
 	struct psp_class *p;
 
 	/* chain normal/pacing class list */
-	cl->state |= FLAG_DMARK;
 	switch (cl->state & MAJOR_MODE_MASK) {
 	case TC_PSP_MODE_NORMAL:
 		list_add_tail(&cl->plist, &q->normal_list);
 		break;
 
-	case TC_PSP_MODE_ESTIMATED:
-		q->mode3=cl;
-	case TC_PSP_MODE_ESTIMATED_GAP:
-	case TC_PSP_MODE_ESTIMATED_DATA:
-		est_add(cl);
 	case TC_PSP_MODE_STATIC:
+		cl->state |= FLAG_DMARK;
 		list_for_each_entry(p, &q->pacing_list, plist) {
 			if (cl->rate > p->rate)
 				break;
@@ -848,130 +415,39 @@ static void estimate_target_rate(struct sk_buff *skb, struct Qdisc *sch,
  *         update gapsize
  *         class clock += packet length + gapsize
  */
-
-#if 0
-#define _TIMER ({struct timeval now; do_gettimeofday(&now); now.tv_sec*(u64)USEC_PER_SEC+now.tv_usec; })
-#define _TIMER_HZ USEC_PER_SEC
-#elif 1
-#define _TIMER ktime_to_ns(ktime_get_real())
-#define _TIMER_HZ NSEC_PER_SEC
-#else
-#define _TIMER jiffies
-#define _TIMER_HZ HZ
-#endif
-
-static inline unsigned long calc_rate_(struct est_data *e, clock_delta time, clock_delta val, unsigned int hz,unsigned int ewma)
-{
-    u64 r=0;
-
-    if(time>EST_QUALITY && (r=mul_div(val,hz,time))) {
-	e->time+=(e->etime=time);
-	e->data+=(e->edata=val);
-	e->rate=r;
-	r+=e->av*(u64)(ewma-1);
-	do_div(r,ewma);
-	e->av=r;
-    }
-    return r;
-}
-
-static inline unsigned long calc_rate(struct est_data *e, u64 time, u64 val, unsigned int hz,unsigned int ewma)
-{
-    return calc_rate_(e,time-e->time,val-e->data,hz,ewma);
-}
-
-static inline void reset_est(struct est_data *e, u64 time, u64 val)
-{
-    e->time=time;
-    e->data=val;
-    e->etime=e->edata=0;
-}
-
-static inline unsigned long estimate_qdisc_rate(struct Qdisc *sch, struct psp_sched_data *q)
-{
-#ifdef CONFIG_NET_SCH_PSP_EST
-    /* estimate master rate */
-    if(q->clock!=q->clock0) {
-	/* enqueue -> dequeue series, very precise time to rate estimation */
-	q->phaze_time=_TIMER;
-	q->clock0=q->clock;
-	if(q->phaze_idle) {
-	    q->phaze_idle=0;
-	    reset_est(&q->bps,q->phaze_time,q->clock);
-	} else if(calc_rate(&q->bps,q->phaze_time,q->clock,_TIMER_HZ,q->ewma))
-	    sch->rate_est.bps=q->bps.av;
-    }
-#endif
-    return q->max_rate==1?sch->rate_est.bps:q->max_rate;
-}
-
-static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
-			    struct psp_class *cl)
+static void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
+			  struct psp_class *cl)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
-	clock_delta len[2]={skb->len,SKB_BACKSIZE(skb)},
-	    t, hw_gap=HW_GAP(q)+FCS, t0=skb->len+hw_gap;
-	unsigned long max_rate=estimate_qdisc_rate(sch,q),rate;
-	int d;
+	unsigned int len = skb->len;
+	u64 gapsize = 0;
 
-    /* child are independent again */
-    for(;cl;cl=cl->parent) {
-	d=(cl->state & TC_PSP_MODE_TCP)/TC_PSP_MODE_TCP;
-	if ((cl->state & FLAG_DMARK)) {
-		/* reset class clock */
-		cl->state &= ~FLAG_DMARK;
-		cl->clock = q->clock;
-#ifdef CONFIG_NET_SCH_PSP_EST
-#if 0
-	    reset_est(&cl->bps,q->phaze_time,cl->phaze_bytes);
-#else
-	    reset_est(&cl->bps,q->clock,cl->phaze_bytes);
-#endif			      
-	} else if( /* estimate class rate */
-#if 0
-	    /* once per phaze */
-	    q->phaze_time!=cl->bps.time && calc_rate(&cl->bps,q->phaze_time,cl->phaze_bytes,_TIMER_HZ,cl->ewma)) {
-#else
-	    calc_rate(&cl->bps,q->clock,cl->phaze_bytes,max_rate,cl->ewma)) {
-#endif
-//	     psp_class_est(cl,cl->bps.etime);
-	    if(cl->qdisc != &noop_qdisc) {
-		    cl->qdisc->rate_est.bps=cl->bps.av;
-//		    cl->qdisc->rate_est.pps=cl->pps.av;
-	    }
-	}
-	cl->phaze_bytes+=len[d]+cl->hw_gap;
-	rate=cl->rate==1?cl->bps.av:cl->rate;
-#else
-	}
-	rate=cl->rate;
-#endif
-	if(((rate=cl->rate)==1)){
-	    rate=cl->qdisc->rate_est.bps;
-	}
-	t=t0;
-	if(!(len[d])) goto gap0;
+	/* update qdisc clock */
+	q->clock += (len + HW_GAP(q) + FCS);
+	if (cl == NULL || (cl->state & MAJOR_MODE_MASK) == TC_PSP_MODE_NORMAL)
+		return;
+
 	/* recalculate gapsize */
 	switch (cl->state & MAJOR_MODE_MASK) {
-	case TC_PSP_MODE_ESTIMATED_DATA:
-		if(!rate) goto gap0;
-		t=mul_div(max_rate, len[d]+cl->hw_gap+HW_ADD, rate) - HW_ADD;
-		t0=t;
-		break;
 	case TC_PSP_MODE_DYNAMIC:
 		estimate_target_rate(skb, sch, cl);
-	case TC_PSP_MODE_ESTIMATED:
-	case TC_PSP_MODE_ESTIMATED_GAP:
+		gapsize = recalc_gapsize(q, cl, len);
+		if (gapsize < MIN_GAP)
+			gapsize = 0;
+		break;
 	case TC_PSP_MODE_STATIC:
-		if(!rate) goto gap0;
-		t=mul_div(max_rate, len[d]+cl->hw_gap+HW_ADD, rate) - HW_ADD;
-		if(t>t0) break;
-	default:
-gap0:
-		t=t0;
+		gapsize = recalc_gapsize(q, cl, len);
 		break;
 	}
-	cl->clock += t;
+
+	/* update class clock */
+	if (!(cl->state & FLAG_DMARK)) {
+		cl->clock += (len + HW_GAP(q) + FCS) + gapsize;
+	} else {
+		/* reset class clock */
+		cl->state &= ~FLAG_DMARK;
+		cl->clock = q->clock + gapsize;
+	}
 
 	/* update connection list */
 	if ((cl->state & MAJOR_MODE_MASK) == TC_PSP_MODE_DYNAMIC) {
@@ -984,11 +460,11 @@ gap0:
 		struct tcphdr *th;
 			
 		if (!is_tcp_packet(skb))
-			goto ret;
+			return;
 		tp = tcp_sk(skb->sk);
 		th = tcp_hdr(skb);
 		if (!th->fin)
-			goto ret;
+			return;
 		/* A closed entry removes from connection list. */
 		list_for_each_entry(cp, &cl->conn, list) {
 			if (tp == cp->tp) {
@@ -998,14 +474,6 @@ gap0:
 			break;
 		}
 	}
-ret:
-	/* moved from psp_dequeue() */
-	if(--QSTATS(cl).qlen == 0)
-	    psp_deactivate(q, cl);
-
-    }
-    /* update qdisc clock */
-    q->clock0 = q->clock += t0;
 }
 
 /*
@@ -1017,731 +485,67 @@ ret:
  * Finally, a gap packet is inserted, because there is not any packets
  * to send out.  And it returns the size of the gap packet.
  */
- 
-/* lookup first by time class from list,
-   return minimum time diff for future class,
-   or class pointer for current/past
- */
-
-static inline clock_delta cut_gap(struct psp_sched_data *q, clock_delta gap)
+static struct psp_class *lookup_next_class(struct Qdisc *sch, u64 *gapsize)
 {
-#ifdef gap_u64
-	clock_delta npkts;
-#endif
-	int hw = HW_GAP(q) + FCS;
-	int tmp = q->mtu + hw;
-	
+	struct psp_sched_data *q = qdisc_priv(sch);
+	struct psp_class *cl, *found = NULL;
+	u64 diff, nearest, npkts, tmp;
+
+	/* pacing class */
+	nearest = q->mtu;
+	list_for_each_entry(cl, &q->pacing_list, plist) {
+		if (found == NULL && cl->clock > q->clock) {
+			diff = cl->clock - q->clock;
+			if (nearest > diff && diff >= MIN_GAP)
+				nearest = diff;
+			continue;
+		}
+		if (!(cl->state & FLAG_ACTIVE)) {
+			cl->state |= FLAG_DMARK;
+			continue;
+		}
+
+		if (found == NULL)
+			found = cl;
+	}
+	if (found)
+		return found;
+
+	/* normal class */
+	list_for_each_entry(cl, &q->normal_list, plist) {
+		if (!(cl->state & FLAG_ACTIVE))
+			continue;
+
+		list_move_tail(&cl->plist, &q->normal_list);
+		return cl;
+	}
+
 	/*
 	 * calculate the gap packet size:
 	 *     npkts = DIV_ROUND_UP(nearest, mtu + HW_GAP + FCS)
 	 *     gap = (nearest / npkts) - (HW_GAP + FCS)
 	 */
-#ifdef gap_u64
-	npkts = gap + tmp - 1;
+	tmp = q->mtu + HW_GAP(q) + FCS;
+	npkts = nearest + tmp - 1;
 	do_div(npkts, tmp);
-	do_div(gap, npkts);
-#else
-	gap=mul_div(gap,tmp,gap+tmp-1);
-#endif
-	return gap-min_t(clock_delta, gap, hw);
-}
-
-static inline u64 max_clock(struct psp_class *cl)
-{
-#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-    u64 res=cl->skb?max_t(u64,psp_tstamp(cl->skb),cl->clock):cl->clock;
-#else
-    u64 res=cl->clock;
-#endif
-
-    while((cl=cl->parent))
-	if(res < cl->clock)
-	    res=cl->clock;
-    return res;
-}
-
-static inline struct psp_class *lookup_early_class(
-    const struct psp_sched_data *q, struct list_head *list, clock_delta *diff)
-{
-	struct psp_class *cl, *next = NULL;
-	u64 clock, nextclock;
-
-	list_for_each_entry(cl, list, plist) {
-//	    if ((clock=max_clock(cl)) <= q->clock && !(cl->state & FLAG_ACTIVE))
-	    if (!(cl->state & FLAG_ACTIVE))
-		    cl->state |= FLAG_DMARK;
-	    /* concurrence? */
-//	    else if (!cl->level && (next == NULL || nextclock > cl->clock)) {
-	    else if (!cl->level) {
-		clock=max_clock(cl);
-		if(next == NULL || nextclock > clock ||
-			(nextclock == clock && next->clock > cl->clock)) {
-		    next = cl;
-		    nextclock = clock;
-		}
-	    }
-	}
-	if (next && nextclock > q->clock) {
-	    *diff = min_t(clock_delta, *diff, nextclock - q->clock);
-	    next = NULL;
-	}
-	return next;
-}
-
-#if 0
-/* this part of code only for compatibility with Takano's NORMAL
-    class behaviour (may be faster with very large number of concurrent
-    NORMAL classes), sometimes verifyed */
-static struct psp_class *lookup_next_class(struct Qdisc *sch, clock_delta *gapsize)
-{
-	struct psp_sched_data *q = qdisc_priv(sch);
-	struct psp_class *cl, *found=NULL;
-	clock_delta nearest = q->mtu,diff;
-	u64 clock;
-
-	/* pacing class */
-	found =lookup_early_class(q,&q->pacing_list,&nearest);
-	if (found)
-	    return found;
-
-	/* normal class */
-	list_for_each_entry(cl, &q->normal_list, plist) {
-	    if (!(cl->state & FLAG_ACTIVE)) {
-		cl->state |= FLAG_DMARK;
-		continue;
-	    }
-	    if (cl->level)
-		continue;
-	    clock = cl->clock;
-	    if (clock > q->clock) {
-		nearest = min_t(clock_delta, nearest, clock - q->clock);
-		continue;
-	    }
-	    list_move_tail(&cl->plist, &q->normal_list);
-	    return cl;		    
-	}
-	*gapsize = cut_gap(q,nearest);
+	do_div(nearest, npkts);
+	*gapsize = nearest - (HW_GAP(q) + FCS);
 	return NULL;
-}
-
-#else
-
-static struct psp_class *lookup_next_class(struct Qdisc *sch, unsigned long *gapsize)
-{
-	struct psp_sched_data *q = qdisc_priv(sch);
-	struct psp_class *cl;
-	clock_delta nearest = q->mtu;
-
-	/* pacing class, then normal class */
-	if ((cl=lookup_early_class(q,&q->pacing_list,&nearest)) == NULL) {
-	    if ((cl=lookup_early_class(q,&q->normal_list,&nearest)) == NULL)
-		*gapsize = cut_gap(q,nearest);
-	    else
-		list_move_tail(&cl->plist, &q->normal_list);
-	}
-	
-	return cl;
-}
-#endif
-
-#ifdef CONFIG_NET_SCH_PSP_RRR
-static void rrr_set(struct psp_class *cl, int w)
-{
-    struct psp_class *cl1;
-
-    list_for_each_entry(cl1, &cl->rlist, rlist)
-	cl1->weight_sum+=w-cl->weight;
-    cl1->weight_sum+=w-cl->weight;
-    cl->weight=w;
-}
-
-static void rrr_move(struct psp_class *cl, struct psp_class *master)
-{
-    int w=cl->weight;
-    
-    rrr_set(cl,0);
-    list_del(&cl->rlist);
-    if(!master) return;
-    cl->weight_sum=master->weight_sum;
-    list_add_tail(&cl->rlist,&master->rlist);
-    rrr_set(cl,w);
-}
-#endif
-
-//#define ip_bit(nr,a) (test_bit(nr,a)!=0)
-#if defined(__LITTLE_ENDIAN_BITFIELD)
-#define ip_bit(nr,a) ((((unsigned char *)(a))[(nr)>>3]>>(7-((nr)&7)))&1)
-#elif defined (__BIG_ENDIAN_BITFIELD)
-#define ip_bit(nr,a) ((((unsigned char *)(a))[(nr)>>3]>>((nr)&7))&1)
-#else
-#error  "Please fix <asm/byteorder.h>"
-#endif
-
-static inline int tohash(u32 x)
-{
-    int i;
-    for(i=HBITS;i<32;i+=HBITS) x^=x>>i;
-    return x&(HSIZE-1);
-}
-
-#if 0
-typedef struct hashitem tcphash[HSIZE];
-
-static inline struct hashitem *tcphash_get(void *h, unsigned long key)
-{
-    return &(*((tcphash *)h))[key];
-}
-
-static inline void *tcphash_init(void)
-{
-    tcphash *h=kzalloc(sizeof(*h),GFP_KERNEL);
-
-    return h;
-}
-
-static inline void tcphash_free(void *h)
-{
-    kfree(h);
-}
-#else
-/* splitting array to 4K pages */
-#define HBITS_ 4
-#define HSIZE_ (1<<HBITS_)
-#define HBITS__ (HBITS-((HBITS/HBITS_-(HBITS%HBITS_==0))*HBITS_))
-#define HSIZE__ (1<<HBITS__)
-typedef void *tcphash_[HSIZE_];
-typedef struct hashitem tcphash__[HSIZE__];
-static inline struct hashitem *tcphash_get(void *h, unsigned long key)
-{
-    int i;
-
-    for(i=0; i<(HBITS-HBITS__)/HBITS_; i++){
-	h=(*((tcphash_ *)h))[key & (HSIZE_-1)];
-	key>>=HBITS_;
-    }
-    return &((*(tcphash__ *)h)[key & (HSIZE__-1)]);
-}
-
-static void _tcphash_free(void *h, int p)
-{
-    int i;
-
-    if(h){
-	if(p<HBITS-HBITS__){
-	    p+=HBITS_;
-	    for(i=0; i<HSIZE_; i++)
-		_tcphash_free((*((tcphash_ *)h))[i],p);
-	}
-	kfree(h);
-    }
-}
-
-static void *_tcphash_init(int p)
-{
-    if(p<HBITS-HBITS__){
-	int i;
-	tcphash_ *h=kmalloc(sizeof(*h),GFP_KERNEL);
-
-	if(h) {
-	    p+=HBITS_;
-	    for(i=0; i<HSIZE_; i++)
-		if(!((*h)[i]=_tcphash_init(p))){
-		    for(i--;i>=0;i--)
-			_tcphash_free((*h)[i],p);
-		    kfree(h);
-		    return NULL;
-		}
-	}
-	return h;
-    }else
-	return kzalloc(sizeof(tcphash__),GFP_KERNEL);
-}
-
-static inline void *tcphash_init(void)
-{
-    return _tcphash_init(0);
-}
-
-static inline void tcphash_free(void *h)
-{
-    _tcphash_free(h,0);
-}
-#endif
-
-static void tree_free(node n)
-{
-    if(*n) {
-	tree_free(&(*n)->b[0]);
-	tree_free(&(*n)->b[1]);
-	kfree(*n);
-	*n=NULL;
-    }
-}
-
-#if NODEVAL == 2
-/* speedup */
-#define node_val_copy(dst,src) (dst)->vv=(src)->vv
-#else
-#define node_val_copy(dst,src) memcpy((dst)->v,(src)->v,sizeof((dst)->v))
-#endif
-
-static inline void tree_node_fix(node n)
-{
-    int i;
-    struct __node *n1=*n;
-    
-    if(n1->b[0]){
-	if(n1->b[1]){		    
-	    for(i=0;i<NODEVAL;i++)
-		n1->v[i]=(n1->b[0]->v[i]+n1->b[1]->v[i])>>1;
-	}else node_val_copy(n1,n1->b[0]);
-    }else if(n1->b[1]) node_val_copy(n1,n1->b[1]);
-    else{
-	*n=NULL;
-	kfree(n1);
-    }
-}
-
-static inline void tree_node_gap(struct __node *n1, u64 clock, int *gap, int len)
-{
-    long g,g1;
-#if 1
-    unsigned long x=n1->v[0]? : 1;
-#else
-    unsigned long x=n1->v[0]+1;
-#endif
-    g=clock-n1->clock;
-    g1=mul_div(g, x+n1->v[1], x);
-    *gap=(*gap+g1-g)>>1;
-    //*gap=max_t(int,*gap,g1-g);
-}
-
-static inline void tree_del(node n, void *key, int size, int v0, int v1)
-{
-    node nn[TREE_MAX];
-    struct __node *n1;
-    int i=0;
-
-    for(;i<size && (n1=*n);i++){
-	nn[i]=n;
-	n=&n1->b[ip_bit(i,key)];
-    }
-    if((n1=*n)){
-	n1->v[1]-=v1;
-	if(!(n1->v[0]-=v0)) tree_node_fix(n);
-	for(i--;i>=0;i--) tree_node_fix(nn[i]);
-    }
-}
-
-#ifdef CONFIG_NET_SCH_PSP_RRR
-static int
-#else
-static node
-#endif
-    tree_get(node n, void *key1, void *key2, int size, int len, int *gap)
-{
-    node nn[TREE_MAX],nx;
-    struct __node *n1;
-    int i=0,j;
-    u64 clock=len;
-#ifdef CONFIG_NET_SCH_PSP_RRR
-    int rrr=0;
-#endif
-
-    if((n1=*(nx=n))){
-	clock+=n1->clock;
-	for(;i<size;i++){
-	    nn[i]=nx;
-	    n1=*(nx=&n1->b[ip_bit(i,key1)]);
-	    if(!n1){
-#ifdef CONFIG_NET_SCH_PSP_RRR
-		rrr=(*nn[i])->rrr;
-#endif
-		goto node;
-	    }
-	}
-	tree_node_gap(n1,clock,gap,len);
-#ifdef CONFIG_NET_SCH_PSP_RRR
-	rrr=n1->rrr;
-#endif
-    }
-node:
-    for(j=i-1;j>=0;j--) tree_node_gap(*nn[j],clock,gap,len);
-#ifdef CONFIG_NET_SCH_PSP_RRR
-    if(key2) rrr=(rrr+tree_get(n,key2,NULL,size,len,gap))>>1;
-#else
-    if(key2) tree_get(n,key2,NULL,size,len,gap);
-#endif
-    for(j=0;j<i;j++) (*nn[j])->clock=clock;
-    if(n1) n1->clock=clock;
-#ifdef CONFIG_NET_SCH_PSP_RRR
-    return rrr;
-#else
-    return nx;
-#endif
-}
-
-#ifdef CONFIG_NET_SCH_PSP_RRR
-static int
-#else
-static node
-#endif
-    tree_add(node n, void *key1, void *key2, int size, int index, int val, int *gap)
-{
-    node nn[TREE_MAX],nx;
-    struct __node *n1;
-    int i=0,j;
-    u64 clock=val;
-#ifdef CONFIG_NET_SCH_PSP_RRR
-    int rrr=0;
-#endif
-
-    if((n1=*(nx=n))){
-	clock+=n1->clock;
-	for(;i<size;i++){
-	    nn[i]=nx;
-	    n1=*(nx=&n1->b[ip_bit(i,key1)]);
-	    if(!n1){
-#ifdef CONFIG_NET_SCH_PSP_RRR
-		rrr=(*nn[i])->rrr;
-#endif
-		goto node;
-	    }
-	}
-#ifdef CONFIG_NET_SCH_PSP_RRR
-	rrr=n1->rrr;
-#endif
-    } else {
-node:
-	for(;i<size;i++){
-	    nn[i]=nx;
-	    if(!((*nx)=n1=kzalloc(sizeof(*n1),GFP_ATOMIC)))
-		goto err;
-	    n1->clock=clock;
-#ifdef CONFIG_NET_SCH_PSP_RRR
-	    n1->rrr=rrr;
-#endif
-	    nx=&n1->b[ip_bit(i,key1)];
-	}
-	if(!((*nx)=n1=kzalloc(sizeof(*n1),GFP_ATOMIC)))
-	    goto err;
-	n1->clock=clock;
-#ifdef CONFIG_NET_SCH_PSP_RRR
-	n1->rrr=rrr;
-#endif
-    }
-    n1->v[index]+=val;
-    tree_node_gap(n1,clock,gap,val);
-#ifdef CONFIG_NET_SCH_PSP_RRR
-    rrr=n1->rrr+=index;
-#endif
-    for(j=i-1;j>=0;j--){
-	tree_node_fix(nn[j]);
-	tree_node_gap(*nn[j],clock,gap,val);
-#ifdef CONFIG_NET_SCH_PSP_RRR
-	(*nn[j])->rrr=rrr;
-#endif
-    }
-#ifdef CONFIG_NET_SCH_PSP_RRR
-    if(key2) rrr=(rrr+tree_add(n,key2,NULL,size,index,val,gap))>>1;
-#else
-    if(key2) tree_add(n,key2,NULL,size,index,val,gap);
-#endif
-    for(j=0;j<i;j++) (*nn[j])->clock=clock;
-    n1->clock=clock;
-#ifdef CONFIG_NET_SCH_PSP_RRR
-    return rrr;
-#else
-    return nx;
-#endif
-err:
-    printk(KERN_ERR "psp: unable to allocate tcp tree node\n");
-#ifdef CONFIG_NET_SCH_PSP_RRR
-    return rrr;
-#else
-    return nx;
-#endif
-}
-
-static inline int retrans_check(struct sk_buff* skb, struct psp_class *cl,struct psp_sched_data *q)
-{
-    int x,asz,gap=0,naddr=0;
-//    int y;
-    unsigned char *th;
-    void *addr[2]={NULL,NULL},*saddr;
-    struct hashitem *h;
-#define TH ((struct tcphdr *)th)
-    int res=0; /* 0-not retransmission, 1-retransmission */
-    clock_t early=0;
-    int len = skb->len;
-    int rrr=0;
-    node iptree;
-    unsigned int hdr_size;
-    u32 seq,aseq;
-
-    if(skb->protocol == __constant_htons(ETH_P_IP)){
-	const struct iphdr *iph = ip_hdr(skb);
-
-	iptree=&cl->iptree;
-	saddr=(void*)&iph->saddr;
-	if(cl->state&TC_PSP_MODE_RETRANS_DST) addr[naddr++]=(void*)&iph->daddr;
-	if(cl->state&TC_PSP_MODE_RETRANS_SRC) addr[naddr++]=saddr;
-	asz=4;
-	if(iph->frag_off&htons(IP_MF|IP_OFFSET)
-		|| iph->protocol != IPPROTO_TCP
-#ifndef CONFIG_IPV6
-		|| iph->version != 4
-#endif
-		) goto ip;
-	th=(unsigned char *)iph+(iph->ihl<<2);
-	x=jhash_3words(iph->saddr,iph->daddr,*(u32 *)th,psp_rand);
-    } else
-#ifdef CONFIG_IPV6
-    if(skb->protocol == __constant_htons(ETH_P_IPV6)){
-	struct ipv6hdr *iph = ipv6_hdr(skb);
-
-	iptree=&cl->ip6tree;
-	saddr=&iph->saddr;
-	if(cl->state&TC_PSP_MODE_RETRANS_DST) addr[naddr++]=&iph->daddr;
-	if(cl->state&TC_PSP_MODE_RETRANS_SRC) addr[naddr++]=saddr;
-	asz=16;
-	if (iph->nexthdr != IPPROTO_TCP) goto ip;
-	x=jhash(&iph->saddr,32,psp_rand);
-	th=(unsigned char *)&iph[1];
-	x=jhash2((u32 *)th,1,x);
-    } else
-#endif
-	    return -1;
-    hdr_size=th-skb->data+(TH->doff<<2);
-    seq=be32_to_cpu(TH->seq);
-    aseq=be32_to_cpu(TH->ack_seq);
-    h=tcphash_get(cl->tcphash,tohash(x));
-#ifdef SYN_WEIGHT
-    if(TH->syn){
-	/* slowdown syn */
-	res=1;
-//	len<<=SYN_WEIGHT;
-	if(h->syn  && !(h->ack ^ TH->ack))
-	    /* second syn */
-	    len<<=SYN_WEIGHT;
-    }
-#endif
-#ifdef TTL
-    if(!h->tcplist.next) goto clean;
-    __list_del(h->tcplist.prev, h->tcplist.next);
-#endif
-    if(
-#ifdef CONFIG_IPV6
-	    h->asize==asz &&
-#endif
-	    !memcmp(&h->saddr,saddr,asz<<1)){
-#ifdef SYN_WEIGHT
-	if((h->syn & TH->syn) && !(h->ack ^ TH->ack)) {
-	    /* syn-flood: syn from&to same IP */
-	    res=1;
-	    len<<=SYN_WEIGHT;
-	}
-#endif
-	if(h->ports==*(u32*)th) {
-	    if(seq==h->seq) {
-		/* same sequence */
-
-		if(TH->ack && (aseq!=h->ack_seq))
-		    goto next_aseq;
-		/* sequences equal or unused, comparing other tcp data */
-		if(memcmp(&h->misc,th+12,sizeof(h->misc)))
-		    goto next_pkt;
-retrans:    	/* same tcp packet - retransmission */
-#ifdef SYN_WEIGHT
-		if(res)  /* packet alredy slowed */
-		    goto continue_connection;
-#endif
-		res=1;
-		if(!(cl->state&TC_PSP_MODE_RETRANS_FAST))
-		    goto continue_connection;
-		early=h->clock;
-		goto continue_connection;
-	    }
-	    if(seq>h->seq) {
-		/* new sequence */
-#ifdef SYN_WEIGHT
-		if(res) goto next_seq; /* packet alredy slowed */
-#endif
-		if(seq==h->end)
-		    /* speedup first packet of sequence */
-		    goto tcp_fast;
-		else if(seq<h->end) {
-		    /* too many data in sequence */
-		    if((h->end-h->seq)>>1 <= (h->end-seq))
-			/* retransmission ("<" - lost before, "=" - after) */
-			/* current packet are not retrans, but count them */
-			    goto tcp_fast_retrans;
-		} else {
-		    /* packet lost or sequence not fully tracked */
-#ifdef STRICT_TCP
-		    /* or sequences with same window trapped to other path */
-		    if(h->end>h->seq && (seq-h->end)%(h->end-h->seq) == 0)
-#endif
-			goto tcp_fast;
-		}
-	    } else {
-		/* old sequence */
-		if(h->seq-seq<=h->v[0])
-		    /* trap to transferred size, retransmission */
-		    goto retrans;
-		/* unsure, new connection or untracked retrans */
-		// goto continue_connection;
-	    }
-	    goto next_seq;
-tcp_fast_retrans:
-	    res=1;
-tcp_fast:
-	    if(!(cl->state&TC_PSP_MODE_RETRANS_FAST))
-		goto next_seq;
-	    early=h->clock;
-	    goto next_seq;
-	}
-    }
-    /* change hashed connection to new */
-    if(cl->state&TC_PSP_MODE_RETRANS_DST) tree_del(iptree,&h->daddr,asz<<3,h->v[0],h->v[1]);
-    if(cl->state&TC_PSP_MODE_RETRANS_SRC) tree_del(iptree,&h->saddr,asz<<3,h->v[0],h->v[1]);
-#if 0
-    memset(h,0,sizeof(struct hashitem));
-#else
-    memset(&h->v,0,HASH_ZERO);
-#endif
-#ifdef TTL
-clean:
-#endif
-    memcpy(&h->saddr,saddr,asz<<1);
-    h->ports=*(u32*)th;
-//    h->clock=psp_tstamp(skb);
-#ifdef CONFIG_IPV6
-    h->asize=asz;
-#endif
-next_seq:
-    h->end=h->seq=seq;
-    if(TH->ack) {
-next_aseq:
-	if(aseq > h->ack_seq && (x=q->mtu-hdr_size)) {
-	    SKB_BACKSIZE(skb)=be16_to_cpu(TH->window);
-	    SKB_BACKSIZE(skb)+=DIV_ROUND_UP(SKB_BACKSIZE(skb),x)*hdr_size;
-	}
-	h->ack_seq=aseq;
-    }
-next_pkt:
-    memcpy(&h->misc,th+12,sizeof(h->misc));
-    // h->end+=(TH->syn?1:(skb->len-hdr_size))+TH->fin; /* rfc793 */
-    h->end+=skb->len-hdr_size+TH->syn+TH->fin;
-continue_connection:
-#ifdef TTL
-    list_add_tail(&h->tcplist,&cl->tcplist);
-#endif
-    h->v[res]+=len;
-    if(cl->state&(TC_PSP_MODE_RETRANS_SRC|TC_PSP_MODE_RETRANS_DST))
-#ifdef CONFIG_NET_SCH_PSP_RRR
-	rrr=
-#endif
-	    tree_add(iptree,addr[0],addr[1],asz<<3,res,len,&gap);
-#ifdef CONFIG_NET_SCH_PSP_RRR
-    if(res) h->rrr=rrr; else rrr=h->rrr;
-#endif
-#if 1
-    h->clock=skb->len+(psp_tstamp(skb)=max_t(u64,psp_tstamp(skb)+gap,h->clock));
-#else
-    h->clock=skb->len+(psp_tstamp(skb)=h->clock+gap);
-#endif
-    if(early) psp_tstamp(skb)=(psp_tstamp(skb)+early)>>1;
-//    if(gap) printk(KERN_DEBUG "mode=%x len=%i gap=%i leaf=%s\n",cl->state,skb->len,gap,cl->qdisc->ops->id);
-#ifdef TTL
-    if((!list_empty(&cl->tcplist)) && cl->clock>(h=(struct hashitem *)cl->tcplist.next)->clock+q->ttl) {
-#ifdef CONFIG_IPV6
-	asz=h->asize;
-#endif
-	if(cl->state&TC_PSP_MODE_RETRANS_DST) tree_del(iptree,&h->daddr,asz<<3,h->v[0],h->v[1]);
-	if(cl->state&TC_PSP_MODE_RETRANS_SRC) tree_del(iptree,&h->saddr,asz<<3,h->v[0],h->v[1]);
-	__list_del(h->tcplist.prev, h->tcplist.next);
-#if 0
-	memset(h,0,sizeof(struct hashitem));
-#else
-	h->tcplist.next=NULL;
-	memset(&h->v,0,HASH_ZERO);
-#endif
-    };
-#endif
-    return rrr;
-ip:
-    if(cl->state&(TC_PSP_MODE_RETRANS_SRC|TC_PSP_MODE_RETRANS_DST))
-#ifdef CONFIG_NET_SCH_PSP_RRR
-	rrr=
-#endif
-	    tree_get(iptree,addr[0],addr[1],asz<<3,len,&gap);
-    psp_tstamp(skb)+=gap;
-    return rrr;
-}
-
-static inline void __skb_queue_tstamp(struct sk_buff_head *list,
-                                   struct sk_buff *newsk)
-{
-    struct sk_buff *prev;
-    
-    for(prev=((struct sk_buff *)list)->prev;
-	prev!=(struct sk_buff *)list && psp_tstamp(prev)>psp_tstamp(newsk);
-	prev=prev->prev)
-	    /* nothing */ ;
-    __skb_queue_after(list, prev, newsk);
-}
-
-static inline struct sk_buff_head *fifo_tstamp_sort(struct sk_buff *skb) /* must be tail */
-{    
-    struct sk_buff_head *list=(struct sk_buff_head *)skb->next;
-
-    if(list && list!=(struct sk_buff_head *)skb) {
-	__skb_queue_tstamp(list,__skb_dequeue_tail(list));
-	return list;
-    }
-    return NULL;
-}
-
-static inline struct sk_buff_head *fifo_requeue_tail(struct sk_buff *skb) /* must be tail */
-{    
-    struct sk_buff_head *list=(struct sk_buff_head *)skb->next;
-
-    if(list && list!=(struct sk_buff_head *)skb) {
-	__skb_queue_head(list,__skb_dequeue_tail(list));
-	return list;
-    }
-    return NULL;
 }
 
 static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
-	struct psp_class *cl, *cl1;
-	int err, len=skb->len, npkt=1, drops=0;
-#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-	struct sk_buff *skb1 = NULL;
-#endif
-
-#ifdef CONFIG_NET_SCH_PSP_EST
-	if(q->clock0==q->clock)
-	    q->phaze_idle=!sch->q.qlen;
-#endif
+	struct psp_class *cl;
+	int err;
 
 	cl = psp_classify(skb, sch, &err);
-#ifdef ENABLE_PSP_DIRECT
 	if (cl == PSP_DIRECT) {
 		/* enqueue to helper queue */
 		__skb_queue_tail(&q->requeue, skb);
 		q->direct_pkts++;
-	} else
-#endif
-	if (cl == NULL) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
+	} else if (cl == NULL) {
 		if (err == NET_XMIT_BYPASS)
-#else
-		if (err & __NET_XMIT_BYPASS)
-#endif
 			QSTATS(sch).drops++;
 		kfree_skb(skb);
 		return err;
@@ -1756,82 +560,23 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 #endif
 		}
 
-		SKB_BACKSIZE(skb)=0;
-//		q->clock0=(psp_tstamp(skb)=max_t(u64,q->clock0,q->clock))+len;
-		q->clock0=(psp_tstamp(skb)=q->clock0)+len+HW_GAP(q)+FCS;
-		for(cl1=cl; cl1; cl1=cl1->parent){
-		    if(cl1->state & TC_PSP_MODE_RETRANS){
-			int rrr=retrans_check(skb,cl1,q);
-#ifdef CONFIG_NET_SCH_PSP_RRR
-			/* change dst mac, etc - "tc pedit" */
-			if(!list_empty(&cl->rlist)){
-			    struct psp_class *cl2=NULL;
-			    rrr%=cl->weight_sum;
-			    if((rrr-=cl->weight)>=0) list_for_each_entry(cl2, &cl->rlist, rlist){
-				if((rrr-=cl2->weight)<0) {
-				    cl=cl2;
-				    break;
-				}
-			    }
-			}
-#endif
-#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-			/* prefetched skb later then this? */
-			if(cl->skb && psp_tstamp(skb)<psp_tstamp(cl->skb)){
-			    skb1=skb;
-			    skb=cl->skb;
-			    cl->skb=skb1;
-			    BSTATS(sch).bytes += len - skb->len;
-			    len=skb->len;
-			}
-#endif
-			break;
-		    }
-		}
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-		if((err = qdisc_enqueue(skb, cl->qdisc)) != NET_XMIT_SUCCESS) {
-			if (net_xmit_drop_count(err))
-#else
 		err = cl->qdisc->ops->enqueue(skb, cl->qdisc);
 		if (unlikely(err != NET_XMIT_SUCCESS)) {
-#endif
-				drops++;
-			npkt=len=0;
-			goto stat;
+			QSTATS(sch).drops++;
+			QSTATS(cl).drops++;
+			return err;
 		}
 
-		if(cl1) {
-		    struct sk_buff_head *list;
-#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-		    if(skb1)
-			list=fifo_requeue_tail(skb);
-		    else
-#endif
-			list=fifo_tstamp_sort(skb);
-		    /* if there are OUR pfifo - drop [limit] oldest packet */
-		    if(list==&cl->qdisc->q && list->qlen==qdisc_dev(sch)->tx_queue_len) {
-			len -= cl->qdisc->ops->drop(cl->qdisc);
-			npkt--;
-			drops++;
-		    }
-		}
-stat:
-		for(; cl; cl=cl->parent) {
-		    QSTATS(cl).qlen += npkt;
-		    BSTATS(cl).packets += npkt;
-		    BSTATS(cl).bytes += len;
-		    QSTATS(cl).drops += drops;
-		    if((!(cl->state & FLAG_ACTIVE)) && npkt)
+		BSTATS(cl).packets++;
+		BSTATS(cl).bytes += skb->len;
+		if (!(cl->state & FLAG_ACTIVE))
 			psp_activate(q, cl);
-		}
 	}
 
-	sch->q.qlen += npkt;
-	BSTATS(sch).packets += npkt;
-	BSTATS(sch).bytes += len;
-	QSTATS(sch).drops += drops;
-
-	return err;
+	sch->q.qlen++;
+	BSTATS(sch).packets++;
+	BSTATS(sch).bytes += skb->len;
+	return NET_XMIT_SUCCESS;
 }
 
 static int psp_requeue(struct sk_buff *skb, struct Qdisc *sch)
@@ -1846,34 +591,15 @@ static int psp_requeue(struct sk_buff *skb, struct Qdisc *sch)
 	return NET_XMIT_SUCCESS;
 }
 
-static inline void _set_maxrate(struct psp_sched_data *q, unsigned long max_rate, struct list_head *list)
-{
-    struct psp_class *cl;
-    
-    list_for_each_entry(cl, list, plist)
-      if(cl->clock) {
-	if(cl->clock > q->clock)
-	    cl->clock = q->clock + mul_div(max_rate, cl->clock-q->clock, q->max_rate);
-	else if(cl->clock < q->clock)
-	    cl->clock = q->clock - mul_div(max_rate, q->clock-cl->clock, q->max_rate);
-      }
-}
-
 static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 {
-	struct sk_buff *skb;
+	struct sk_buff *skb = NULL;
 	struct psp_sched_data *q = qdisc_priv(sch);
-	struct psp_class *cl=NULL;
-	clock_delta gapsize;
+	struct psp_class *cl;
+	u64 gapsize;
 
-	q->mtu=MTU(sch);
-
-	if (sch->q.qlen == 0) {
-		if (q->mode3 && q->clock < q->mode3->clock)
-		    /* reset qdisc clock */
-		    q->clock = q->mode3->clock;
+	if (sch->q.qlen == 0)
 		return NULL;
-	}
 
 	/* requeue */
 	skb = __skb_dequeue(&q->requeue);
@@ -1881,26 +607,15 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 		sch->q.qlen--;
 		return skb;
 	}
-lookup:
+
 	/* normal/pacing class */
 	cl = lookup_next_class(sch, &gapsize);
 	if (cl != NULL) {
-#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-		/* prefetch single packet with individual gap */
-		skb=cl->skb;
-		cl->skb=NULL;
-		if(skb == NULL){
-#endif
-			skb = cl->qdisc->ops->dequeue(cl->qdisc);
-			if (skb == NULL)
-				return NULL; /* nothing to send */
-#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-		    	if(psp_tstamp(skb) > q->clock){
-				cl->skb=skb;
-				goto lookup;
-		    	}
-		}
-#endif
+		skb = cl->qdisc->ops->dequeue(cl->qdisc);
+		if (skb == NULL)
+			return NULL; /* nothing to send */
+
+		sch->q.qlen--;
 
 		/* estimate sender-side queuing delay by EWMA:
 		 * qtime <- (1 - a) * qtime + a * tmp, where a = 1/16
@@ -1921,14 +636,10 @@ lookup:
 				cl->qtime += tmp >> QTIME_ALPHA;
 			}
 		}
-		sch->q.qlen--;
-		update_clocks(skb, sch, cl);
-		return skb;
+		goto update_clocks;
 	}
-	/* per-packet gap on interface */
-	gapsize -= min_t(unsigned long, gapsize, q->hw_gap);
+
 	/* clone a gap packet */
-	gapsize = max_t(int, gapsize, sizeof(struct gaphdr));
 	skb = skb_clone(q->gap, GFP_ATOMIC);
 	if (unlikely(!skb)) {
 		printk(KERN_ERR "psp: cannot clone a gap packet.\n");
@@ -1937,8 +648,13 @@ lookup:
 	skb_trim(skb, gapsize);
 	q->xstats.bytes += gapsize;
 	q->xstats.packets++;
-	q->clock+=q->hw_gap;
-	update_clocks(skb,sch,NULL);
+        if (debug)
+		((struct gaphdr *)skb->data)->h_len = htons(gapsize);
+
+ update_clocks:
+	update_clocks(skb, sch, cl);
+	if (cl && cl->qdisc->q.qlen == 0)
+		psp_deactivate(q, cl);
 	return skb;
 }
 
@@ -1951,11 +667,14 @@ static unsigned int psp_drop(struct Qdisc *sch)
 	list_for_each_entry(cl, &q->drop_list, dlist) {
 		if (cl->qdisc->ops->drop != NULL &&
 		    (len = cl->qdisc->ops->drop(cl->qdisc)) > 0) {
-			if(deq(sch,q,cl,1) == 0)
-			    list_move_tail(&cl->dlist, &q->drop_list);
+			if (cl->qdisc->q.qlen == 0)
+				psp_deactivate(q, cl);
+			else
+				list_move_tail(&cl->dlist, &q->drop_list);
 
 			QSTATS(cl).drops++;
 			QSTATS(sch).drops++;
+			sch->q.qlen--;
 			return len;
 		}
 	}
@@ -1966,25 +685,12 @@ static void psp_reset(struct Qdisc *sch)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl;
-	unsigned int i;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-	struct hlist_node *n;
-#endif
+	int i;
 
 	for (i = 0; i < PSP_HSIZE; i++) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 		list_for_each_entry(cl, &q->hash[i], hlist) {
-#else
-		hlist_for_each_entry(cl, n, &q->clhash.hash[i], common.hnode) {
-#endif
-			QSTATS(cl).qlen=0;
-			if(cl->skb){
-			    kfree_skb(cl->skb);
-			    cl->skb=NULL;
-			}
-			if (cl->level == 0) {
+			if (cl->level == 0)
 				qdisc_reset(cl->qdisc);
-			}
 		}
 	}
 
@@ -1993,26 +699,13 @@ static void psp_reset(struct Qdisc *sch)
 	sch->q.qlen = 0;
 }
 
-static u64 _phy_rate(struct Qdisc *sch)
-{
-	struct ethtool_cmd cmd = { ETHTOOL_GSET };
-#ifdef NETIF_F_TSO
-	if (qdisc_dev(sch)->ethtool_ops && qdisc_dev(sch)->ethtool_ops->get_settings) {
-		if (qdisc_dev(sch)->ethtool_ops->get_settings(qdisc_dev(sch), &cmd) == 0) {
-			phy_rate = cmd.speed * (1000000 / BITS_PER_BYTE);
-		}
-	}
-#endif
-    return phy_rate;
-}
-
 static int psp_change(struct Qdisc *sch, struct nlattr *opt)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
-	struct nlattr *tb[_OPT(TCA_PSP_QOPT+1)];
+	struct nlattr *tb[_OPT(TCA_PSP_MAX + 1)];
 	struct tc_psp_qopt *qopt;
 
-	if (opt == NULL || nla_parse_nested(tb, TCA_PSP_QOPT ,opt, NULL) ||
+	if (opt == 0 || nla_parse_nested(tb, TCA_PSP_MAX, opt, NULL) ||
 	    tb[_OPT(TCA_PSP_QOPT)] == NULL ||
 	    nla_len(tb[_OPT(TCA_PSP_QOPT)]) < sizeof(*qopt)) {
 		return -EINVAL;
@@ -2020,30 +713,15 @@ static int psp_change(struct Qdisc *sch, struct nlattr *opt)
 
 	qopt = nla_data(tb[_OPT(TCA_PSP_QOPT)]);
 
-	if(qopt->chk != sizeof(*qopt)) {
-	    printk(KERN_ERR "psp: qdisc options size / tc version mismatch (%u/%u)\n",qopt->chk,sizeof(*qopt));
-	    return -EINVAL;
-	}
-
 	sch_tree_lock(sch);
-	if (qopt->defcls) {
+	if (qopt->defcls)
 		q->defcls = qopt->defcls;
-		bind_default(sch);
-	}
-#define chopt(x,y) if((y)) (x)=(y);
-	chopt(q->ifg,qopt->ifg);
-	chopt(est_min,mul_div(qopt->est_min,HZ,USEC_PER_SEC));
-	chopt(est_max,mul_div(qopt->est_max,HZ,USEC_PER_SEC));
-	chopt(est_ewma,qopt->ewma);
-	chopt(q->ewma,qopt->ewma);
+	if (qopt->ifg)
+		q->ifg = qopt->ifg;
 	if (qopt->rate)
-		q->default_rate = q->max_rate = qopt->rate;
+		q->max_rate = qopt->rate;
 	else
-		q->default_rate = q->max_rate = _phy_rate(sch);
-	if(qopt->rate==1) q->bps.av=sch->rate_est.bps=_phy_rate(sch);
-#ifdef TTL
-	q->ttl=mul_div(TTL,q->max_rate,MSEC_PER_SEC);
-#endif
+		q->max_rate = phy_rate;
 	sch_tree_unlock(sch);
 
 	return 0;
@@ -2052,10 +730,10 @@ static int psp_change(struct Qdisc *sch, struct nlattr *opt)
 static int psp_init(struct Qdisc *sch, struct nlattr *opt)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
-	struct net_device *dev = qdisc_dev(sch);
-	int i;
+	struct net_device *dev = sch->dev;
+	struct ethtool_cmd cmd = { ETHTOOL_GSET };
+	int i, ret;
 
-	memset(q, 0, sizeof(*q));
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,23)
 	/*
 	 * NOTE: PSPacer can only work as a root qdisc since it produces
@@ -2068,7 +746,6 @@ static int psp_init(struct Qdisc *sch, struct nlattr *opt)
 		printk(KERN_ERR "psp: PSPacer cannot work as a leaf qdisc.\n");
 		return -EINVAL;
 	}
-	_phy_rate(sch);
 #endif
 
 	if (dev->type != ARPHRD_ETHER) {
@@ -2083,36 +760,34 @@ static int psp_init(struct Qdisc *sch, struct nlattr *opt)
 		       dev->name);
 		return -EINVAL;
 	}
+
+	if (dev->ethtool_ops && dev->ethtool_ops->get_settings) {
+		if (dev->ethtool_ops->get_settings(dev, &cmd) == 0) {
+			phy_rate = cmd.speed * 1000000;
+			do_div(phy_rate, BITS_PER_BYTE);
+		}
+	}
 #endif
-	q->defclass = PSP_DIRECT;	
+
 	q->ifg = 12; /* default ifg is 12 byte. */
-	q->ewma=EWMA_DEFAULT;
-	i = psp_change(sch, opt);
-	if (i) {
+	ret = psp_change(sch, opt);
+	if (ret) {
 		printk(KERN_ERR "psp: change failed.\n");
-		return i;
+		return ret;
 	}
 
-	q->mtu = MTU(sch);
+	q->mtu = dev->mtu + dev->hard_header_len;
 	q->gap = alloc_gap_packet(sch, q->mtu);
 	if (q->gap == NULL)
 		return -ENOBUFS;
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 	INIT_LIST_HEAD(&q->root);
 	for (i = 0; i < PSP_HSIZE; i++)
 		INIT_LIST_HEAD(q->hash + i);
-#else
-	i = qdisc_class_hash_init(&q->clhash);
-	if (i < 0)
-		return i;
-#endif
 	INIT_LIST_HEAD(&q->drop_list);
 	INIT_LIST_HEAD(&q->pacing_list);
 	INIT_LIST_HEAD(&q->normal_list);
 	skb_queue_head_init(&q->requeue);
-
-	if(!psp_rand) psp_rand=random32();
 
 	return 0;
 }
@@ -2139,29 +814,15 @@ static void psp_destroy_class(struct Qdisc *sch, struct psp_class *cl)
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *pos, *next;
 
-	if(q->defclass==cl) q->defclass=PSP_DIRECT;
-	if (cl->parent)
-	    cl->parent->allocated_rate -= cl->max_rate;
-	else
-	    q->allocated_rate -= cl->max_rate;
-	est_del(cl);
-	if(q->mode3==cl) q->mode3=NULL;
-	if(cl->back) {
-	    if(cl->back->forward==cl) cl->back->forward=NULL;
-	    cl->back=NULL;
+	if ((cl->state & MAJOR_MODE_MASK) == TC_PSP_MODE_STATIC) {
+		if (cl->parent)
+			cl->parent->allocated_rate -= cl->rate;
+		else
+			q->allocated_rate -= cl->rate;
 	}
-	if(cl->forward) {
-	    if(cl->forward->back==cl) cl->forward->back=NULL;
-	    cl->forward=NULL;
-	}
-#ifdef CONFIG_NET_SCH_PSP_RRR
-	rrr_move(cl,NULL);
-#endif
-
 
 	psp_destroy_chain(&cl->filter_list);
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 	list_for_each_entry_safe(pos, next, &cl->children, sibling)
 		psp_destroy_class(sch, pos);
 
@@ -2172,44 +833,19 @@ static void psp_destroy_class(struct Qdisc *sch, struct psp_class *cl)
 		list_del(&cl->plist);
 		qdisc_destroy(cl->qdisc);
 	}
-#endif
-	if(cl->skb){
-	    kfree_skb(cl->skb);
-	    cl->skb=NULL;
-	}
-	if(q->defclass==cl) q->defclass=PSP_DIRECT;
-	tcphash_free(cl->tcphash);
-	tree_free(&cl->iptree);
-#ifdef CONFIG_IPV6
-	tree_free(&cl->ip6tree);
-#endif
 	kfree(cl);
 }
 
 static void psp_destroy(struct Qdisc *sch)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
-	struct psp_class *cl;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
-	struct psp_class *next;
-#else
-	struct hlist_node *n, *next;
-	unsigned int i;
-#endif
+	struct psp_class *cl, *next;
 
 	psp_destroy_chain(&q->filter_list);
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 	list_for_each_entry_safe(cl, next, &q->root, sibling)
 		psp_destroy_class(sch, cl);
-#else
-	for (i = 0; i < q->clhash.hashsize; i++) {
-		hlist_for_each_entry_safe(cl, n, next, &q->clhash.hash[i],
-		common.hnode)
-		psp_destroy_class(sch, cl);
-	}
-	qdisc_class_hash_destroy(&q->clhash);
-#endif
+
 	__skb_queue_purge(&q->requeue);
 
 	/* free gap packet */
@@ -2225,8 +861,6 @@ static int psp_dump(struct Qdisc *sch, struct sk_buff *skb)
 	struct nlattr *nla;
 	struct tc_psp_qopt qopt;
 
-//	memset(&qopt, 0, sizeof(qopt));
-	qopt.chk = sizeof(qopt);
 	qopt.defcls = q->defcls;
 	qopt.ifg = q->ifg;
 	qopt.rate = q->max_rate;
@@ -2244,7 +878,7 @@ static int psp_dump(struct Qdisc *sch, struct sk_buff *skb)
 	return skb->len;
 
  nla_put_failure:
-	nla_nest_cancel(skb, nla);
+	skb_trim(skb, skb_tail_pointer(skb) - skb->data);
 	return -1;
 }
 
@@ -2261,28 +895,27 @@ static int psp_dump_class(struct Qdisc *sch, unsigned long arg,
 			  struct sk_buff *skb, struct tcmsg *tcm)
 {
 	struct psp_class *cl = (struct psp_class *)arg;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,25)
 	unsigned char *b = skb_tail_pointer(skb);
-#endif
 	struct nlattr *nla;
 	struct tc_psp_copt copt;
 
-	tcm->tcm_parent = cl->parent ? class_id(cl->parent) : TC_H_ROOT;
-	tcm->tcm_handle = class_id(cl);
+	tcm->tcm_parent = cl->parent ? cl->parent->classid : TC_H_ROOT;
+	tcm->tcm_handle = cl->classid;
 	if (cl->level == 0) {
 		tcm->tcm_info = cl->qdisc->handle;
+		QSTATS(cl).qlen = cl->qdisc->q.qlen;
 	}
 
 	nla = nla_nest_start(skb, TCA_OPTIONS);
 	if (nla == NULL)
 		goto nla_put_failure;
 	memset(&copt, 0, sizeof(copt));
-	copt.chk = sizeof(copt);
 	copt.level = cl->level;
 	copt.mode = cl->state & MODE_MASK;
 	copt.rate = cl->max_rate;
 	NLA_PUT(skb, TCA_PSP_COPT, sizeof(copt), &copt);
-//	NLA_PUT(skb, TCA_PSP_QOPT, 0, NULL); /* ??? */
+	NLA_PUT(skb, TCA_PSP_QOPT, 0, NULL);
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,10)
 	NLA_PUT(skb, TCA_STATS, sizeof(cl->stats), &cl->stats);
 #endif
@@ -2290,7 +923,7 @@ static int psp_dump_class(struct Qdisc *sch, unsigned long arg,
 	return skb->len;
 
  nla_put_failure:
-	nla_nest_cancel(skb, nla);
+	skb_trim(skb, b - skb->data);
 	return -1;
 }
 
@@ -2318,7 +951,12 @@ static int psp_graft(struct Qdisc *sch, unsigned long arg, struct Qdisc *new,
 	if (cl->level != 0)
 		return -EINVAL;
 	if (new == NULL) {
-		new = q_create_dflt(sch,class_id(cl));
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,20)
+		new = qdisc_create_dflt(sch->dev, &pfifo_qdisc_ops,
+					cl->classid);
+#else
+		new = qdisc_create_dflt(sch->dev, &pfifo_qdisc_ops);
+#endif
 		if (new == NULL)
 			new = &noop_qdisc;
 	}
@@ -2326,8 +964,6 @@ static int psp_graft(struct Qdisc *sch, unsigned long arg, struct Qdisc *new,
 	sch_tree_lock(sch);
 	*old = xchg(&cl->qdisc, new);
 	sch->q.qlen -= (*old)->q.qlen;
-	for(; cl; cl=cl->parent)
-	    QSTATS(cl).qlen -= (*old)->q.qlen;
 	qdisc_reset(*old);
 	sch_tree_unlock(sch);
 	return 0;
@@ -2363,33 +999,17 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl = (struct psp_class *)*arg, *parent;
 	struct nlattr *opt = tca[_OPT(TCA_OPTIONS)];
-	struct nlattr *tb[_OPT(TCA_PSP_MAX+1)];
+	struct nlattr *tb[_OPT(TCA_PSP_MAX + 1)];
 	struct tc_psp_copt *copt;
-	int limit;
-	unsigned long *all_rate;
-	struct psp_class *rrr=NULL;
+	unsigned int limit;
 
 	if (opt == NULL ||
 	    nla_parse(tb, TCA_PSP_MAX, nla_data(opt), nla_len(opt), NULL))
 		return -EINVAL;
 
-
 	copt = nla_data(tb[_OPT(TCA_PSP_COPT)]);
 
-	if(copt->chk != sizeof(*copt)) {
-	    printk(KERN_ERR "psp: class options size / tc version mismatch (%u/%u)\n",copt->chk,sizeof(*copt));
-	    return -EINVAL;
-	}
-
 	parent = (parentid == TC_H_ROOT ? NULL : psp_find(parentid, sch));
-	all_rate = parent?&parent->allocated_rate:&q->allocated_rate;
-
-	if(copt->rrr) {
-	    u32 m=TC_H_MAKE(TC_H_MAJ(sch->handle), copt->rrr);
-
-	    if(!(m==classid || (rrr=psp_find(m,sch))))
-		return -EINVAL;
-	}
 
 	if (cl == NULL) { /* create new class */
 		struct Qdisc *new_q;
@@ -2398,92 +1018,55 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 		if (cl == NULL)
 			return -ENOBUFS;
 		memset(cl, 0, sizeof(struct psp_class));
-		cl->sch=sch;
 		cl->refcnt = 1;
-		cl->ewma=EWMA_DEFAULT;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 		INIT_LIST_HEAD(&cl->sibling);
-		INIT_LIST_HEAD(&cl->hlist);
-//		INIT_HLIST_NODE(&cl->hlist);
 		INIT_LIST_HEAD(&cl->children);
-#else
-		cl->children = 0;
-#endif
+		INIT_LIST_HEAD(&cl->hlist);
 		INIT_LIST_HEAD(&cl->dlist);
 		INIT_LIST_HEAD(&cl->plist);
-		INIT_LIST_HEAD(&cl->elist);
 		INIT_LIST_HEAD(&cl->conn);
-#ifdef TTL
-		INIT_LIST_HEAD(&cl->tcplist);
-#endif
 
-#ifdef CONFIG_NET_SCH_PSP_RRR
-		INIT_LIST_HEAD(&cl->rlist);
-		cl->weight=1;
-		cl->weight_sum=1;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,20)
+		new_q = qdisc_create_dflt(sch->dev, &pfifo_qdisc_ops, classid);
+#else
+		new_q = qdisc_create_dflt(sch->dev, &pfifo_qdisc_ops);
 #endif
-
-		new_q = q_create_dflt(sch,classid);
 		sch_tree_lock(sch);
-		cl->qdisc = new_q ? new_q : &noop_qdisc;
-		class_id(cl) = classid;
-		cl->parent = parent;
-		if (parent && parent->level == 0) {
+		if (parent && parent->level != 0) {
 			unsigned int qlen = parent->qdisc->q.qlen;
 
 			/* turn parent into inner node */
 			qdisc_reset(parent->qdisc);
-			deq(sch,q,cl,qlen);
+			sch->q.qlen -= qlen;
 			qdisc_destroy(parent->qdisc);
-			parent->qdisc = &noop_qdisc;
+			psp_deactivate(q, cl);
 			list_del(&parent->plist);
-			parent->level=cl->level+1;
-		}
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
+			parent->level = (parent->parent ? parent->parent->level
+					 : TC_PSP_MAXDEPTH) - 1;
+		}
+		cl->qdisc = new_q ? new_q : &noop_qdisc;
+		cl->classid = classid;
+		cl->parent = parent;
+
 		list_add_tail(&cl->hlist, q->hash + psp_hash(classid));
 		list_add_tail(&cl->sibling,
 			      (parent ? &parent->children : &q->root));
-#else
-		qdisc_class_hash_insert(&q->clhash, &cl->common);
-		if (parent)
-			parent->children++;
-#endif
 	} else {
-		*all_rate -= cl->rate;
+		if ((cl->state & MAJOR_MODE_MASK) == TC_PSP_MODE_STATIC)
+			q->allocated_rate -= cl->rate;
+
 		sch_tree_lock(sch);
 	}
 
 	/* setup mode and target rate */
 	cl->state = (cl->state & ~MODE_MASK) | (copt->mode & MODE_MASK);
-	if (copt->rate < MIN_TARGET_RATE && copt->rate != 1)
+	if (copt->rate < MIN_TARGET_RATE)
 		copt->rate = MIN_TARGET_RATE;
-	chopt(cl->ewma,copt->ewma);
 	cl->max_rate = copt->rate;
-	cl->hw_gap = copt->hw_gap;
-#ifdef CONFIG_NET_SCH_PSP_RRR
-	if(copt->weight) rrr_set(cl,copt->weight);
-	if(copt->rrr) rrr_move(cl,rrr);
-#endif
-	est_del(cl);
-	if(q->mode3==cl) q->mode3=NULL;
 
 	switch (cl->state & MAJOR_MODE_MASK) {
-	case TC_PSP_MODE_ESTIMATED:
-		if(!parent)
-		    q->mode3=cl;
-	case TC_PSP_MODE_ESTIMATED_GAP:
-	case TC_PSP_MODE_ESTIMATED_GAP_DATA:
-	case TC_PSP_MODE_ESTIMATED_DATA:
-		/* max_gap now are min_gap */
-		cl->max_rate=max_t(unsigned long,copt->rate,MIN_TARGET_RATE);
-		est_add(cl);
-		break;
 	case TC_PSP_MODE_STATIC:
-#if 1
-		cl->rate = cl->max_rate;
-		/* let it be oversubscribed! */
-#else
 		limit = (parent ? parent->allocated_rate : q->allocated_rate) +
 			cl->max_rate;
 		if (limit > q->max_rate) {
@@ -2496,13 +1079,11 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 			sch_tree_unlock(sch);
 			return -EINVAL;
 		}
-		
 		cl->rate = cl->max_rate;
 		if (parent)
 			parent->allocated_rate += cl->rate;
 		else
 			q->allocated_rate += cl->rate;
-#endif
 		break;
 
 	case TC_PSP_MODE_DYNAMIC:
@@ -2511,28 +1092,13 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 		else
 			cl->max_rate = q->max_rate;
 		break;
-	default:
-		break;
 	}
-	*all_rate += cl->max_rate;
 
 	if (cl->level == 0) {
 		if (!list_empty(&cl->plist))
 			list_del(&cl->plist);
 		add_leaf_class(q, cl);
 	}
-	if(cl->state&TC_PSP_MODE_RETRANS){
-	    if(!cl->tcphash)
-		cl->tcphash=tcphash_init();
-	}else if(cl->tcphash) {
-	    tcphash_free(cl->tcphash);
-	    cl->tcphash=NULL;
-	    tree_free(&cl->iptree);
-#ifdef CONFIG_IPV6
-	    tree_free(&cl->ip6tree);
-#endif
-	}
-	bind_default(sch);
 	sch_tree_unlock(sch);
 	*arg = (unsigned long)cl;
 	return 0;
@@ -2541,30 +1107,21 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 static int psp_delete(struct Qdisc *sch, unsigned long arg)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
-	struct psp_class *cl = (struct psp_class *)arg, *cl1;
+	struct psp_class *cl = (struct psp_class *)arg;
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 	if (!list_empty(&cl->children) || cl->filter_cnt)
-#else
-	if (cl->children || cl->filter_cnt)
-#endif
 		return -EBUSY;
 
 	sch_tree_lock(sch);
 
-	if (cl->level == 0)
-	    qdisc_reset(cl->qdisc);
+	if (cl->level == 0) {
+		unsigned int qlen = cl->qdisc->q.qlen;
 
-	sch->q.qlen -= QSTATS(cl).qlen;
-	for(cl1=cl->parent; cl1; cl1=cl1->parent)
-	    QSTATS(cl1).qlen -= QSTATS(cl).qlen;
+		sch->q.qlen -= qlen;
+		qdisc_reset(cl->qdisc);
+	}
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 	list_del_init(&cl->hlist);
-#else
-	qdisc_class_hash_remove(&q->clhash, &cl->common);
-	cl->parent->children--;
-#endif
 	psp_deactivate(q, cl);
 	list_del_init(&cl->plist);
 	if (--cl->refcnt == 0)
@@ -2577,21 +1134,15 @@ static int psp_delete(struct Qdisc *sch, unsigned long arg)
 static void psp_walk(struct Qdisc *sch, struct qdisc_walker *arg)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
-	unsigned int i;
-	struct psp_class *cl;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-	struct hlist_node *n;
-#endif
+	int i;
 
 	if (arg->stop)
 		return;
 
 	for (i = 0; i < PSP_HSIZE; i++) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
+		struct psp_class *cl;
+
 		list_for_each_entry(cl, &q->hash[i], hlist) {
-#else
-		hlist_for_each_entry(cl, n, &q->clhash.hash[i], common.hnode) {
-#endif
 			if (arg->count < arg->skip) {
 				arg->count++;
 				continue;
