@@ -68,8 +68,7 @@ MODULE_PARM_DESC(debug, "add the size to packet header for debugging (0|1)");
  */
 u64 phy_rate = 125000000;
 
-struct conn
-{
+struct conn {
 	struct list_head list;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,11)
 	struct tcp_sock *tp;
@@ -82,8 +81,7 @@ struct conn
 	int cwnd;
 };
 
-struct psp_class
-{
+struct psp_class {
 	u32 classid;			/* class id */
 	int refcnt;			/* reference count */
 
@@ -123,8 +121,7 @@ struct psp_class
 	struct list_head conn;		/* connection list(for dynamic mode) */
 };
 
-struct psp_sched_data
-{
+struct psp_sched_data {
 	int defcls;				/* default class id */
 	struct list_head root;			/* root class list */
 	struct list_head hash[PSP_HSIZE];	/* class hash */
@@ -171,7 +168,7 @@ static const unsigned char gap_dest[ETH_ALEN] = {0x01, 0x80, 0xc2, 0x00,
 						 0x00, 0x01};
 
 
-static inline int is_tcp_packet(struct sk_buff* skb)
+static inline int is_tcp_packet(struct sk_buff *skb)
 {
 	struct iphdr *iph = ip_hdr(skb);
 
@@ -182,7 +179,7 @@ static inline int is_tcp_packet(struct sk_buff* skb)
 		return 1;
 }
 
-static inline int is_gap_packet(struct sk_buff* skb)
+static inline int is_gap_packet(struct sk_buff *skb)
 {
 	/* NOTE: check only skb's dest address */
 	if (memcmp(skb->data, gap_dest, ETH_ALEN) == 0)
@@ -537,7 +534,7 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl;
-	int err;
+	int uninitialized_var(err);
 
 	cl = psp_classify(skb, sch, &err);
 	if (cl == PSP_DIRECT) {
