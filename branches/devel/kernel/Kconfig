@@ -39,9 +39,11 @@ config NET_SCH_PSP_EST
 	depends on NET_SCH_PSP
 	---help---
 	 Say Y to estimate rate for psp qdisc and every class.
-	 Additional code will be used per every packet.
+	 Some additional code will be used per every packet.
+	 Not similar with "ESTIMATED_*" modes (this modes going
+	 to deprecated state).
 
-	 Say Y to use: "tc qdisc ... psp rate auto [ewma 5]"
+	 Say N to estimate only "rate auto".
 
 config NET_SCH_PSP_RRR
 	bool "Enable Retransmission-Round-Robin"

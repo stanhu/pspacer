@@ -21,11 +21,10 @@
 /* PSP section */
 #define TC_PSP_MAXDEPTH	(8)
 
-struct tc_psp_copt
-{
-	__u32	chk;		/* length of tc_psp_copt to version verify */
-	__u32	level;
-	__u32	mode;
+struct tc_psp_copt {
+	__u32 chk;		/* length of tc_psp_copt to version verify */
+	__u32 level;
+	__u32 mode;
 #define TC_PSP_MODE_NORMAL	(0)
 #define TC_PSP_MODE_STATIC	(1)
 #define TC_PSP_MODE_DYNAMIC	(2)
@@ -41,35 +40,32 @@ struct tc_psp_copt
 #define TC_PSP_MODE_TCP		(0x800)
 #define TC_PSP_MAJ_MODE_MASK	(0x000000FFU)
 #define TC_PSP_MIN_MODE_MASK	(0x0000FF00U)
-	__u32	rate;		/* bytes/sec */
-	__u32	hw_gap;		/* ethernet: ifg+preamble+FCS (0 - software) */
-	__u32	back_dev;	/* interactive: back class device */
-	__u32	back_id;	/* interactive: back class id */
-	__u32	weight;		/* class weight for RRR */
-	__u32	rrr;		/* master class index */
-	__u32	ewma;		/* rate estimator EWMA */
+	__u32 rate;		/* bytes/sec */
+	__u32 hw_gap;		/* ethernet: ifg+preamble+FCS (0 - software) */
+	__u32 back_dev;		/* interactive: back class device */
+	__u32 back_id;		/* interactive: back class id */
+	__u32 weight;		/* class weight for RRR */
+	__u32 rrr;		/* master class index */
+	__u32 ewma;		/* rate estimator EWMA */
 };
 
-struct tc_psp_qopt
-{
-	__u32	chk;		/* length of tc_psp_qopt to version verify */
-	__u32	defcls;
-	__u32	rate;		/* bytes/sec */
-	__u32	direct_pkts;
-	__u32	ifg;
-	__u32	est_min;
-	__u32	est_max;
-	__u32	ewma;
+struct tc_psp_qopt {
+	__u32 chk;		/* length of tc_psp_qopt to version verify */
+	__u32 defcls;
+	__u32 rate;		/* bytes/sec */
+	__u32 direct_pkts;
+	__u32 ifg;
+	__u32 est_min;
+	__u32 est_max;
+	__u32 ewma;
 };
 
-struct tc_psp_xstats
-{
-	__u32	bytes;		/* gap packet statistics */
-	__u32	packets;
+struct tc_psp_xstats {
+	__u32 bytes;		/* gap packet statistics */
+	__u32 packets;
 };
 
-enum
-{
+enum {
 	TCA_PSP_UNSPEC,
 	TCA_PSP_COPT,
 	TCA_PSP_QOPT,
@@ -107,17 +103,17 @@ static inline void *qdisc_priv(struct Qdisc *q)
 #endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,14)
-static inline void 
+static inline void
 skb_get_timestamp(const struct sk_buff *skb, struct timeval *stamp)
 {
-	stamp->tv_sec  = skb->stamp.tv_sec;
+	stamp->tv_sec = skb->stamp.tv_sec;
 	stamp->tv_usec = skb->stamp.tv_usec;
 }
 
-static inline void 
+static inline void
 skb_set_timestamp(struct sk_buff *skb, const struct timeval *stamp)
 {
-	skb->stamp.tv_sec  = stamp->tv_sec;
+	skb->stamp.tv_sec = stamp->tv_sec;
 	skb->stamp.tv_usec = stamp->tv_usec;
 }
 #endif
@@ -163,15 +159,15 @@ skb_set_timestamp(struct sk_buff *skb, const struct timeval *stamp)
 #define DIV_ROUND_UP(x, y) (((x) + ((y) - 1)) / (y))
 #endif
 
-#ifndef __read_mostly /* include/linux/cache.h */
+#ifndef __read_mostly		/* include/linux/cache.h */
 #define __read_mostly
 #endif
 
-#ifndef BITS_PER_BYTE /* include/linux/bitops.h */
+#ifndef BITS_PER_BYTE		/* include/linux/bitops.h */
 #define BITS_PER_BYTE 8
 #endif
 
-#ifndef ETH_P_PAUSE /* include/linux/if_ether.h */
+#ifndef ETH_P_PAUSE		/* include/linux/if_ether.h */
 #define ETH_P_PAUSE 0x8808
 #endif
 

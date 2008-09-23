@@ -46,7 +46,7 @@ static void explain(void)
 " rate     physical interface bandwidth\n"
 " ifg      inter frame gap size\n"
 " psp-est  rate estimator(s) parameters (random interval MIN..MAX, TIME=ewma)\n"
-" ewma     rate estimator EWMA\n"
+" ewma     rate estimator EWMA time, nsec\n"
 "\n... class add ... psp mode M [ rate MBPS ] [hw GAP] [back DEVICE CLASSID]\n"
 " mode     target rate estimation method (NORMAL=%x STATIC=%x DYNAMIC=%x) {0}\n"
 "          ESTIMATED=%x ESTIMATED_GAP=%x ESTIMATED_DATA=%x ESTIMATED_GAP_DATA=%x\n"
@@ -61,7 +61,7 @@ static void explain(void)
 " back     back-direction psp device and classid (for ESTIMATED_INTERACTIVE)\n"
 " rrr      minor id of master class for retransmission-round-robin\n"
 " weight   class weight for retransmission-round-robin\n"
-" ewma     rate estimator EWMA\n",
+" ewma     rate estimator EWMA time, bytes (per QDISC rate)\n",
 	TC_PSP_MODE_NORMAL, TC_PSP_MODE_STATIC, TC_PSP_MODE_DYNAMIC,
 	TC_PSP_MODE_ESTIMATED, TC_PSP_MODE_ESTIMATED_GAP, TC_PSP_MODE_ESTIMATED_DATA, TC_PSP_MODE_ESTIMATED_GAP_DATA,
 	TC_PSP_MODE_ESTIMATED_INTERACTIVE,
@@ -78,12 +78,12 @@ static void explain1(char *arg)
 
 int _get_usecs(__u32 *time, const char *str)
 {
-	unsigned x;
-	int res = get_time(&x, str);
-
-	*time = x;
-	*time = (*time) * 1000000 / TIME_UNITS_PER_SEC;
-	return res;
+    unsigned x;
+    int res=get_time(&x,str);
+    
+    *time=x;
+    *time=(*time)*1000000/TIME_UNITS_PER_SEC;
+    return res;
 }
 
 static int psp_parse_opt(struct qdisc_util *qu, int argc, char **argv,
@@ -139,11 +139,11 @@ static int psp_parse_opt(struct qdisc_util *qu, int argc, char **argv,
 				explain1("psp-est");
 				return -1;
 			}
-			if (qopt.est_min<=0 || qopt.est_max<qopt.est_min ||
-			    qopt.est_max<qopt.ewma) {
+			if(qopt.est_min<=0 || qopt.est_max<qopt.est_min
+			    || qopt.est_max<qopt.ewma) {
 				explain1("psp-est");
 				return -1;
-			}
+			}			    
 		} else if (matches(*argv, "help") == 0) {
 			explain();
 			return -1;
@@ -168,7 +168,7 @@ static int psp_print_opt(struct qdisc_util *qu, FILE *f, struct rtattr *opt)
 	struct rtattr *tb[TCA_PSP_MAX+1];
 	struct tc_psp_copt *copt;
 	struct tc_psp_qopt *qopt;
-	char m1[64] = {0};
+	char m1[64]={0};
 	SPRINT_BUF(b);
 
 	if (opt == NULL)
@@ -182,8 +182,8 @@ static int psp_print_opt(struct qdisc_util *qu, FILE *f, struct rtattr *opt)
 		if (RTA_PAYLOAD(tb[TCA_PSP_COPT]) < sizeof(*copt))
 			return -1;
 		fprintf(f, "level %d ", (int)copt->level);
-		if ((copt->mode & TC_PSP_MIN_MODE_MASK))
-			sprintf(m1,"(0x%x)",copt->mode);
+		if((copt->mode & TC_PSP_MIN_MODE_MASK))
+		    sprintf(m1,"(0x%x)",copt->mode);
 		switch (copt->mode & TC_PSP_MAJ_MODE_MASK) {
 		case TC_PSP_MODE_NORMAL:
 			fprintf(f, "mode NORMAL%s ", m1);
@@ -266,12 +266,12 @@ static int psp_parse_class_opt(struct qdisc_util *qu, int argc, char **argv,
 			NEXT_ARG();
 			strncpy(d, *argv, sizeof(d)-1);
 			if ((copt.back_dev = ll_name_to_index(d)) == 0) {
-				fprintf(stderr, "Cannot find device \"%s\"\n", d);
-				return 1;
+			    fprintf(stderr, "Cannot find device \"%s\"\n", d);
+			    return 1;
 			}
 			NEXT_ARG();
 			if (get_tc_classid(&copt.back_id, *argv))
-				invarg(*argv, "invalid class ID");
+			    invarg(*argv, "invalid class ID");
 		} else if (matches(*argv, "rrr") == 0) {
 			NEXT_ARG();
 			if (get_u32(&copt.rrr, *argv, 16)) {
@@ -302,13 +302,14 @@ static int psp_parse_class_opt(struct qdisc_util *qu, int argc, char **argv,
 	}
 
 	if (copt.rate) {
-		if ((copt.mode & TC_PSP_MAJ_MODE_MASK) == TC_PSP_MODE_NORMAL) {
-			fprintf(stderr, "You can not set to \"rate\" parameter "
-				"in normal mode\n");
-			explain1("rate");
-			return -1;
-		}
-	} else if ((copt.mode & TC_PSP_MAJ_MODE_MASK) == TC_PSP_MODE_STATIC) {
+	    if ((copt.mode&TC_PSP_MAJ_MODE_MASK) == TC_PSP_MODE_NORMAL) {
+		fprintf(stderr, "You can not set to \"rate\" parameter "
+			"in normal mode\n");
+		explain1("rate");
+		return -1;
+	    }
+	} else if ((copt.mode&TC_PSP_MAJ_MODE_MASK) == TC_PSP_MODE_STATIC) {
+	    
 		fprintf(stderr, "You need set to \"rate\" parameter "
 			"in static target rate mode.\n");
 		explain1("rate");
