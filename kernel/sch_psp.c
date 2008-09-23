@@ -135,7 +135,6 @@ struct psp_sched_data {
 	long direct_pkts;
 
 	struct tcf_proto *filter_list;		/* filter list */
-	int filter_cnt;				/* filter count */
 
 	u32 ifg;				/* inter frame gap */
 #define HW_GAP(q) (8 + ((q)->ifg))		/* preamble + IFG */
@@ -1165,25 +1164,20 @@ static struct tcf_proto **psp_find_tcf(struct Qdisc *sch, unsigned long arg)
 static unsigned long psp_bind_filter(struct Qdisc *sch, unsigned long parent,
 				     u32 classid)
 {
-	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl = psp_find(classid, sch);
 
 	if (cl)
 		cl->filter_cnt++;
-	else
-		q->filter_cnt++;
+
 	return (unsigned long)cl;
 }
 
 static void psp_unbind_filter(struct Qdisc *sch, unsigned long arg)
 {
-	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl = (struct psp_class *)arg;
 
 	if (cl)
 		cl->filter_cnt--;
-	else
-		q->filter_cnt--;
 }
 
 static struct Qdisc_class_ops psp_class_ops = {
