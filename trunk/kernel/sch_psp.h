@@ -148,4 +148,8 @@ skb_set_timestamp(struct sk_buff *skb, const struct timeval *stamp)
 #define ETH_P_PAUSE 0x8808
 #endif
 
+#ifndef uninitialized_var
+#define uninitialized_var(x) (x)
+#endif
+
 #endif /* __KERNEL__ */
