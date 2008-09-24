@@ -22,7 +22,6 @@
 #include <linux/if_arp.h>
 #include <linux/in.h>
 #include <linux/ip.h>
-#include <linux/tcp.h>
 #include <net/pkt_sched.h>
 #include <asm/div64.h>
 
@@ -68,19 +67,6 @@ MODULE_PARM_DESC(debug, "add the size to packet header for debugging (0|1)");
  */
 u64 phy_rate = 125000000;
 
-struct conn {
-	struct list_head list;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,11)
-	struct tcp_sock *tp;
-#else
-	struct tcp_opt *tp;
-#endif
-	u32 max_seq;
-	u64 rate;
-	int rtt;			/* RTT in msec */
-	int cwnd;
-};
-
 struct psp_class {
 	u32 classid;			/* class id */
 	int refcnt;			/* reference count */
@@ -115,9 +101,6 @@ struct psp_class {
 	u64 max_rate;			/* maximum target rate */
 	u64 allocated_rate;		/* allocated rate to children */
 	u64 clock;			/* class local byte clock */
-	long qtime;			/* sender-side queuing time (us) */
-
-	struct list_head conn;		/* connection list(for dynamic mode) */
 };
 
 struct psp_sched_data {
@@ -164,26 +147,6 @@ struct gaphdr {
 static const unsigned char gap_dest[ETH_ALEN] = {0x01, 0x80, 0xc2, 0x00,
 						 0x00, 0x01};
 
-
-static inline int is_tcp_packet(struct sk_buff *skb)
-{
-	struct iphdr *iph = ip_hdr(skb);
-
-	if (skb->protocol != __constant_htons(ETH_P_IP) ||
-	    iph->protocol != IPPROTO_TCP)
-		return 0;
-	else
-		return 1;
-}
-
-static inline int is_gap_packet(struct sk_buff *skb)
-{
-	/* NOTE: check only skb's dest address */
-	if (memcmp(skb->data, gap_dest, ETH_ALEN) == 0)
-		return 1;
-	else
-		return 0;
-}
 
 static struct sk_buff *alloc_gap_packet(struct Qdisc *sch, int size)
 {
@@ -342,63 +305,7 @@ static void add_leaf_class(struct psp_sched_data *q, struct psp_class *cl)
 		}
 		list_add_tail(&cl->plist, &p->plist);
 		break;
-
-	case TC_PSP_MODE_DYNAMIC:
-		list_add_tail(&cl->plist, &q->pacing_list);
-		break;
 	}
-}
-
-/*
- * estimate the target rate for dynamic pacing mode.
- */
-static void estimate_target_rate(struct sk_buff *skb, struct Qdisc *sch,
-				 struct psp_class *cl)
-{
-	struct iphdr *iph;
-	struct tcphdr *th;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,11)
-	struct tcp_sock *tp;
-#else
-	struct tcp_opt *tp;
-#endif
-	struct conn *cp, *new_cp;
-
-	iph = ip_hdr(skb);
-	if (!is_tcp_packet(skb))
-		return;
-	th = tcp_hdr(skb);
-	tp = tcp_sk(skb->sk);
-
-	/* lookup connection */
-	list_for_each_entry(cp, &cl->conn, list)
-		if (tp == cp->tp)
-			goto end_lookup;
-	new_cp = kmalloc(sizeof(*new_cp), GFP_ATOMIC);
-	if (new_cp == NULL) {
-		printk(KERN_ERR "psp: cannot allocate a connection entry.\n");
-		return;
-	}
-	memset(new_cp, 0, sizeof(*new_cp));
-	new_cp->tp = tp;
-	list_add(&new_cp->list, &cl->conn);
-	cp = new_cp;
-
- end_lookup:
-	if (cp->max_seq < ntohl(th->seq)) {
-		u32 tmp;
-
-		cp->max_seq = ntohl(th->seq);
-		cp->rtt = jiffies_to_msecs(tp->srtt) >> 3;
-		/*cp->rtt -= (cl->qtime / 1000);*/
-		cp->rtt -= DIV_ROUND_UP(cl->qtime, 1000);
-		if (cp->rtt <= 0) return;
-
-		tmp = (tp->snd_cwnd * tp->mss_cache) / cp->rtt;
-		cp->rate = min_t(u64, tmp * 1000, cl->max_rate);
-		if (cp->rate == 0) return;
-	}
-	cl->rate = cp->rate;
 }
 
 /*
@@ -414,25 +321,14 @@ static void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
 	unsigned int len = skb->len;
-	u64 gapsize = 0;
+	u64 gapsize;
 
 	/* update qdisc clock */
 	q->clock += (len + HW_GAP(q) + FCS);
 	if (cl == NULL || (cl->state & MAJOR_MODE_MASK) == TC_PSP_MODE_NORMAL)
 		return;
 
-	/* recalculate gapsize */
-	switch (cl->state & MAJOR_MODE_MASK) {
-	case TC_PSP_MODE_DYNAMIC:
-		estimate_target_rate(skb, sch, cl);
-		gapsize = recalc_gapsize(q, cl, len);
-		if (gapsize < MIN_GAP)
-			gapsize = 0;
-		break;
-	case TC_PSP_MODE_STATIC:
-		gapsize = recalc_gapsize(q, cl, len);
-		break;
-	}
+	gapsize = recalc_gapsize(q, cl, len);
 
 	/* update class clock */
 	if (!(cl->state & FLAG_DMARK)) {
@@ -441,32 +337,6 @@ static void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		/* reset class clock */
 		cl->state &= ~FLAG_DMARK;
 		cl->clock = q->clock + gapsize;
-	}
-
-	/* update connection list */
-	if ((cl->state & MAJOR_MODE_MASK) == TC_PSP_MODE_DYNAMIC) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,11)
-		struct tcp_sock *tp;
-#else
-		struct tcp_opt *tp;
-#endif
-		struct conn *cp;
-		struct tcphdr *th;
-			
-		if (!is_tcp_packet(skb))
-			return;
-		tp = tcp_sk(skb->sk);
-		th = tcp_hdr(skb);
-		if (!th->fin)
-			return;
-		/* A closed entry removes from connection list. */
-		list_for_each_entry(cp, &cl->conn, list) {
-			if (tp == cp->tp) {
-				list_del(&cp->list);
-				kfree(cp);
-			}
-			break;
-		}
 	}
 }
 
@@ -544,16 +414,6 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 		kfree_skb(skb);
 		return err;
 	} else {
-		if ((cl->state & MAJOR_MODE_MASK) == TC_PSP_MODE_DYNAMIC) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,22)
-			skb->tstamp = ktime_get_real();
-#else
-			struct timeval now;
-			do_gettimeofday(&now);
-			skb_set_timestamp(skb, &now);
-#endif
-		}
-
 		err = cl->qdisc->ops->enqueue(skb, cl->qdisc);
 		if (unlikely(err != NET_XMIT_SUCCESS)) {
 			QSTATS(sch).drops++;
@@ -610,26 +470,6 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 			return NULL; /* nothing to send */
 
 		sch->q.qlen--;
-
-		/* estimate sender-side queuing delay by EWMA:
-		 * qtime <- (1 - a) * qtime + a * tmp, where a = 1/16
-		 */
-#define QTIME_ALPHA (4)
-		if ((cl->state & MAJOR_MODE_MASK) == TC_PSP_MODE_DYNAMIC) {
-			struct timeval now, skb_stamp;
-			long tmp;
-
-			do_gettimeofday(&now);
-			skb_get_timestamp(skb, &skb_stamp);
-			tmp = (now.tv_sec - skb_stamp.tv_sec) * 1000 
-				+ (now.tv_usec - skb_stamp.tv_usec);
-			if (cl->qtime == 0) {
-				cl->qtime = tmp;
-			} else if (tmp > 0) {
-				cl->qtime -= cl->qtime >> QTIME_ALPHA;
-				cl->qtime += tmp >> QTIME_ALPHA;
-			}
-		}
 		goto update_clocks;
 	}
 
@@ -1015,7 +855,6 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 		INIT_LIST_HEAD(&cl->hlist);
 		INIT_LIST_HEAD(&cl->dlist);
 		INIT_LIST_HEAD(&cl->plist);
-		INIT_LIST_HEAD(&cl->conn);
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,20)
 		new_q = qdisc_create_dflt(sch->dev, &pfifo_qdisc_ops, classid);
@@ -1057,18 +896,16 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	cl->max_rate = copt->rate;
 
 	switch (cl->state & MAJOR_MODE_MASK) {
+	case TC_PSP_MODE_NORMAL:
+		break;
+
 	case TC_PSP_MODE_STATIC:
 		limit = (parent ? parent->allocated_rate : q->allocated_rate) +
 			cl->max_rate;
 		if (limit > q->max_rate) {
 			printk(KERN_ERR
 			       "psp: target rate is oversubscribed.\n");
-			list_del_init(&cl->hlist);
-			psp_deactivate(q, cl);
-			if (--cl->refcnt == 0)
-				psp_destroy_class(sch, cl);
-			sch_tree_unlock(sch);
-			return -EINVAL;
+			goto invalid_parameter;
 		}
 		cl->rate = cl->max_rate;
 		if (parent)
@@ -1077,12 +914,10 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 			q->allocated_rate += cl->rate;
 		break;
 
-	case TC_PSP_MODE_DYNAMIC:
-		if (parent && parent->level == 0)
-			cl->max_rate = parent->max_rate;
-		else
-			cl->max_rate = q->max_rate;
-		break;
+	default:
+		printk(KERN_ERR "psp: unknown major mode=%x.\n",
+		       cl->state & MAJOR_MODE_MASK);
+		goto invalid_parameter;
 	}
 
 	if (cl->level == 0) {
@@ -1093,6 +928,14 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	sch_tree_unlock(sch);
 	*arg = (unsigned long)cl;
 	return 0;
+
+ invalid_parameter:
+	list_del_init(&cl->hlist);
+	psp_deactivate(q, cl);
+	if (--cl->refcnt == 0)
+		psp_destroy_class(sch, cl);
+	sch_tree_unlock(sch);
+	return -EINVAL;
 }
 
 static int psp_delete(struct Qdisc *sch, unsigned long arg)

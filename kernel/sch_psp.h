@@ -24,7 +24,6 @@ struct tc_psp_copt
 	__u32	mode;
 #define TC_PSP_MODE_NORMAL	(0)
 #define TC_PSP_MODE_STATIC	(1)
-#define TC_PSP_MODE_DYNAMIC	(2)
 #define TC_PSP_MAJ_MODE_MASK	(0x000000FFU)
 #define TC_PSP_MIN_MODE_MASK	(0x0000FF00U)
 	__u32	rate;		/* bytes/sec */
