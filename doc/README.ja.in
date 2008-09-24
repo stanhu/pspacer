@@ -10,7 +10,8 @@ PSPacer は，Linux 上で動作するソフトウェアによる精密なペーシング機構です．
 National Research Grid Initiative）により行われました．
 PSPacer は，GNU GPLライセンスのもとで公開されています．
 
-より詳細な情報はプロジェクトページ http://www.gridmpi.org/ を参照してください．
+より詳細な情報はプロジェクトページ http://www.gridmpi.org/pspacer.jsp 
+を参照してください．
 
 NOTE: PSPacer バージョン2.xは，Linuxカーネル2.4をサポートしていません．
 

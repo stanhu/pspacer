@@ -59,7 +59,7 @@
  * [1] R.Takano, T.Kudoh, Y.Kodama, M.Matsuda, H.Tezuka, and Y.Ishikawa,
  *     "Design and Evaluation of Precise Software Pacing Mechanisms for
  *     Fast Long-Distance Networks", PFLDnet2005.
- * [2] http://www.gridmpi.org/gridtcp.jsp
+ * [2] http://www.gridmpi.org/pspacer.jsp
  */
 
 #define FCS    (4)		/* Frame Check Sequence(4) */
