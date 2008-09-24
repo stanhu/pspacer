@@ -93,8 +93,7 @@ struct psp_class {
 #endif
 	int level;			/* class level in hierarchy */
 	struct psp_class *parent;	/* parent class */
-	struct list_head sibling;	/* sibling classes */
-	struct list_head children;	/* child classes */
+	unsigned int children;		/* number of clildren */
 
 	struct Qdisc *qdisc;		/* leaf qdisc */
 
@@ -123,7 +122,6 @@ struct psp_class {
 
 struct psp_sched_data {
 	int defcls;				/* default class id */
-	struct list_head root;			/* root class list */
 	struct list_head hash[PSP_HSIZE];	/* class hash */
 	struct list_head drop_list;		/* active leaf class list (for
 						   dropping) */
@@ -777,7 +775,6 @@ static int psp_init(struct Qdisc *sch, struct nlattr *opt)
 	if (q->gap == NULL)
 		return -ENOBUFS;
 
-	INIT_LIST_HEAD(&q->root);
 	for (i = 0; i < PSP_HSIZE; i++)
 		INIT_LIST_HEAD(q->hash + i);
 	INIT_LIST_HEAD(&q->drop_list);
@@ -807,28 +804,21 @@ static void psp_destroy_chain(struct tcf_proto **fl)
 
 static void psp_destroy_class(struct Qdisc *sch, struct psp_class *cl)
 {
-	struct psp_sched_data *q = qdisc_priv(sch);
-	struct psp_class *pos, *next;
-
-	if ((cl->state & MAJOR_MODE_MASK) == TC_PSP_MODE_STATIC) {
-		if (cl->parent)
-			cl->parent->allocated_rate -= cl->rate;
-		else
-			q->allocated_rate -= cl->rate;
-	}
-
-	psp_destroy_chain(&cl->filter_list);
-
-	list_for_each_entry_safe(pos, next, &cl->children, sibling)
-		psp_destroy_class(sch, pos);
-
-	list_del(&cl->hlist);
-	list_del(&cl->sibling);
-	psp_deactivate(q, cl);
 	if (cl->level == 0) {
 		list_del(&cl->plist);
 		qdisc_destroy(cl->qdisc);
 	}
+
+	if ((cl->state & MAJOR_MODE_MASK) == TC_PSP_MODE_STATIC) {
+		if (cl->parent)
+			cl->parent->allocated_rate -= cl->rate;
+		else {
+			struct psp_sched_data *q = qdisc_priv(sch);
+			q->allocated_rate -= cl->rate;
+		}
+	}
+
+	psp_destroy_chain(&cl->filter_list);
 	kfree(cl);
 }
 
@@ -836,12 +826,18 @@ static void psp_destroy(struct Qdisc *sch)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl, *next;
+	unsigned int i;
 
 	psp_destroy_chain(&q->filter_list);
 
-	list_for_each_entry_safe(cl, next, &q->root, sibling)
-		psp_destroy_class(sch, cl);
-
+	for (i = 0; i < PSP_HSIZE; i++) {
+		list_for_each_entry(cl, &q->hash[i], hlist)
+			psp_destroy_chain(&cl->filter_list);
+	}
+	for (i = 0; i < PSP_HSIZE; i++) {
+		list_for_each_entry_safe(cl, next, &q->hash[i], hlist)
+			psp_destroy_class(sch, cl);
+	}
 	__skb_queue_purge(&q->requeue);
 
 	/* free gap packet */
@@ -1015,8 +1011,7 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 			return -ENOBUFS;
 		memset(cl, 0, sizeof(struct psp_class));
 		cl->refcnt = 1;
-		INIT_LIST_HEAD(&cl->sibling);
-		INIT_LIST_HEAD(&cl->children);
+		cl->children = 0;
 		INIT_LIST_HEAD(&cl->hlist);
 		INIT_LIST_HEAD(&cl->dlist);
 		INIT_LIST_HEAD(&cl->plist);
@@ -1046,8 +1041,8 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 		cl->parent = parent;
 
 		list_add_tail(&cl->hlist, q->hash + psp_hash(classid));
-		list_add_tail(&cl->sibling,
-			      (parent ? &parent->children : &q->root));
+		if (parent)
+			parent->children++;
 	} else {
 		if ((cl->state & MAJOR_MODE_MASK) == TC_PSP_MODE_STATIC)
 			q->allocated_rate -= cl->rate;
@@ -1105,7 +1100,7 @@ static int psp_delete(struct Qdisc *sch, unsigned long arg)
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl = (struct psp_class *)arg;
 
-	if (!list_empty(&cl->children) || cl->filter_cnt)
+	if (cl->children || cl->filter_cnt)
 		return -EBUSY;
 
 	sch_tree_lock(sch);
@@ -1118,6 +1113,8 @@ static int psp_delete(struct Qdisc *sch, unsigned long arg)
 	}
 
 	list_del_init(&cl->hlist);
+	if (cl->parent)
+		cl->parent->children--;
 	psp_deactivate(q, cl);
 	list_del_init(&cl->plist);
 	if (--cl->refcnt == 0)
