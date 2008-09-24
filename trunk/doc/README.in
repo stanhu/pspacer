@@ -46,7 +46,7 @@ Therefore, to achieve precise pacing, they require the operating system
 to maintain a high resolution timer, which could incur a large overhead.
 
 For detailed description and the usage of PSPacer, please refer to 
-our project page (http://www.gridmpi.org/gridtcp.jsp), and the paper
+our project page (http://www.gridmpi.org/pspacer.jsp), and the paper
 "Design and Evaluation of Precise Software Pacing Mechanisms for Fast 
 Long-Distance Networks," in PFLDnet2005.
 
