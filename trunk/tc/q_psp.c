@@ -43,7 +43,7 @@ static void explain(void)
 " rate     physical interface bandwidth\n"
 " ifg      inter frame gap size\n\n"
 "... class add ... psp mode M [ rate MBPS ]\n"
-" mode     target rate estimation method (NORMAL=0 STATIC=1 DYNAMIC=2) {0}\n"
+" mode     target rate estimation method (NORMAL=0 STATIC=1) {0}\n"
 " rate     rate allocated to this class\n");
 }
 
@@ -125,10 +125,6 @@ static int psp_print_opt(struct qdisc_util *qu, FILE *f, struct rtattr *opt)
 			break;
 		case TC_PSP_MODE_STATIC:
 			fprintf(f, "mode STATIC (%s) ", 
-				sprint_rate(copt->rate, b));
-			break;
-		case TC_PSP_MODE_DYNAMIC:
-			fprintf(f, "mode DYNAMIC (%s) ",
 				sprint_rate(copt->rate, b));
 			break;
 		}
