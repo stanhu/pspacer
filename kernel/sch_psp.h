@@ -27,7 +27,7 @@ struct tc_psp_copt {
 	__u32 mode;
 #define TC_PSP_MODE_NORMAL	(0)
 #define TC_PSP_MODE_STATIC	(1)
-#define TC_PSP_MODE_DYNAMIC	(2)
+#define TC_PSP_MODE_STATIC_RATE	(2)
 #define TC_PSP_MODE_ESTIMATED	(3)
 #define TC_PSP_MODE_ESTIMATED_GAP	(4)
 #define TC_PSP_MODE_ESTIMATED_DATA	(5)

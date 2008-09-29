@@ -48,7 +48,7 @@ static void explain(void)
 " psp-est  rate estimator(s) parameters (random interval MIN..MAX, TIME=ewma)\n"
 " ewma     rate estimator EWMA time, nsec\n"
 "\n... class add ... psp mode M [ rate MBPS ] [hw GAP] [back DEVICE CLASSID]\n"
-" mode     target rate estimation method (NORMAL=%x STATIC=%x DYNAMIC=%x) {0}\n"
+" mode     target rate estimation method (NORMAL=%x STATIC=%x STATIC_RATE=%x) {0}\n"
 "          ESTIMATED=%x ESTIMATED_GAP=%x ESTIMATED_DATA=%x ESTIMATED_GAP_DATA=%x\n"
 "          ESTIMATED_INTERACTIVE=%x (ESTIMATED_* is under construction)\n"
 "          +0x%x destination retransmit correction\n"
@@ -62,7 +62,7 @@ static void explain(void)
 " rrr      minor id of master class for retransmission-round-robin\n"
 " weight   class weight for retransmission-round-robin\n"
 " ewma     rate estimator EWMA time, bytes (per QDISC rate)\n",
-	TC_PSP_MODE_NORMAL, TC_PSP_MODE_STATIC, TC_PSP_MODE_DYNAMIC,
+	TC_PSP_MODE_NORMAL, TC_PSP_MODE_STATIC, TC_PSP_MODE_STATIC_RATE,
 	TC_PSP_MODE_ESTIMATED, TC_PSP_MODE_ESTIMATED_GAP, TC_PSP_MODE_ESTIMATED_DATA, TC_PSP_MODE_ESTIMATED_GAP_DATA,
 	TC_PSP_MODE_ESTIMATED_INTERACTIVE,
 	TC_PSP_MODE_RETRANS_DST, TC_PSP_MODE_RETRANS_SRC, TC_PSP_MODE_RETRANS_FAST,
@@ -192,8 +192,8 @@ static int psp_print_opt(struct qdisc_util *qu, FILE *f, struct rtattr *opt)
 			fprintf(f, "mode STATIC%s (%s) ", m1,
 				sprint_rate(copt->rate, b));
 			break;
-		case TC_PSP_MODE_DYNAMIC:
-			fprintf(f, "mode DYNAMIC%s (%s) ", m1,
+		case TC_PSP_MODE_STATIC_RATE:
+			fprintf(f, "mode STATIC_RATE%s (%s) ", m1,
 				sprint_rate(copt->rate, b));
 			break;
 		default:
