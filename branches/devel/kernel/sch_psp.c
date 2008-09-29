@@ -240,7 +240,7 @@ struct psp_class {
 #define MINOR_MODE_MASK (0x0000ff00)
 #define FLAG_ACTIVE     (0x00010000)	/*  the class has packets or not */
 #define FLAG_DMARK      (0x00020000)	/*  reset mark */
-	int direction;			/* fast access to submode +0x800 */
+	int direction;		/* fast access to submode +0x800 */
 
 	unsigned long rate;	/* current target rate (bytes/sec) */
 	unsigned long max_rate;	/* maximum target rate */
@@ -380,7 +380,7 @@ static inline u64 mul_div(const unsigned long x, const unsigned long y,
 }
 
 static inline u64 mul_div_up(const unsigned long x, const unsigned long y,
-			  const unsigned long z)
+			     const unsigned long z)
 {
 #if 0
 	u64 tmp = ~(u64) 0;
@@ -393,13 +393,13 @@ static inline u64 mul_div_up(const unsigned long x, const unsigned long y,
 		do_div(tmp, z);
 		tmp *= y;
 	} else {
-		tmp = tmp * y +z - 1;
+		tmp = tmp * y + z - 1;
 		do_div(tmp, z);
 	}
 #else
 	u64 tmp = x;
 
-	tmp = tmp * y +z - 1;
+	tmp = tmp * y + z - 1;
 	tmp += z - 1;
 	do_div(tmp, z);
 #endif
@@ -866,7 +866,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	struct psp_sched_data *q = qdisc_priv(sch);
 	clock_delta len[2] = { skb->len, SKB_BACKSIZE(skb) },
 	    hw_gap = HW_GAP(q) + FCS, t0 = skb->len + hw_gap;
-	long long t;
+	u64 t;
 	unsigned long max_rate = q->max_rate, rate;
 
 #ifdef CONFIG_NET_SCH_PSP_EST
@@ -959,6 +959,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			t = t * max_rate + cl->tail;
 			cl->tail = do_div(t, rate);
 #endif
+			break;
 		default:
 			break;
 		}
@@ -970,7 +971,9 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			QSTATS(cl).backlog = 0;
 			psp_deactivate(q, cl);
 		} else
-			QSTATS(cl).backlog -= min_t(unsigned long, len[cl->direction], QSTATS(cl).backlog);
+			QSTATS(cl).backlog -=
+			    min_t(unsigned long, len[cl->direction],
+				  QSTATS(cl).backlog);
 	}
 	q->clock0 = q->clock += t0;
 }
@@ -993,7 +996,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 static inline clock_delta cut_gap(struct psp_sched_data *q, clock_delta gap)
 {
 #ifdef gap_u64
-	clock_delta npkts;
+	u64 npkts;
 #endif
 	int hw = HW_GAP(q) + FCS;
 	int tmp = q->mtu + hw;
@@ -1008,7 +1011,7 @@ static inline clock_delta cut_gap(struct psp_sched_data *q, clock_delta gap)
 	do_div(npkts, tmp);
 	do_div(gap, npkts);
 #else
-	gap = mul_div(gap, tmp, gap + tmp - 1);
+	gap /= (gap + tmp - 1) / tmp;
 #endif
 	return gap - min_t(clock_delta, gap, hw);
 }
@@ -1687,7 +1690,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		    tree_get(iptree, addr[0], addr[1], asz << 3, len, &gap);
 	psp_tstamp(skb) += gap;
 #if 0
-	SKB_BACKSIZE(skb) = len; /* ???: think, non-tcp packet produce same traf */
+	SKB_BACKSIZE(skb) = len;	/* ???: think, non-tcp packet produce same traf */
 #endif
 	return rrr;
 }
@@ -1766,7 +1769,7 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 #ifdef CONFIG_NET_SCH_PSP_RRR
 				int rrr =
 #endif
-				retrans_check(skb, cl1, q);
+				    retrans_check(skb, cl1, q);
 				len[1] = SKB_BACKSIZE(skb);
 #ifdef CONFIG_NET_SCH_PSP_RRR
 				/* change dst mac, etc - "tc pedit" */
@@ -2522,7 +2525,7 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 		break;
 	default:
 		printk(KERN_ERR "psp: unknown major mode=%x.\n",
-			cl->state & MAJOR_MODE_MASK);
+		       cl->state & MAJOR_MODE_MASK);
 		goto invalid_parameter;
 		break;
 	}
@@ -2548,7 +2551,7 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	sch_tree_unlock(sch);
 	*arg = (unsigned long)cl;
 	return 0;
-invalid_parameter:
+      invalid_parameter:
 	list_del_init(&cl->hlist);
 	psp_deactivate(q, cl);
 	if (--cl->refcnt == 0)
