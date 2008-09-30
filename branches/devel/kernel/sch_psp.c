@@ -1874,6 +1874,13 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 	return err;
 }
 
+/* lindent problem */
+#ifdef CONFIG_NET_SCH_FORCE_GAP
+#define FORCE_GAP if (q->last) goto min_gap;
+#else
+#define FORCE_GAP ;
+#endif
+
 static int psp_requeue(struct sk_buff *skb, struct Qdisc *sch)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
@@ -1922,59 +1929,57 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 		skb = cl->skb;
 		cl->skb = NULL;
 		if (skb == NULL) {
-#elif defined(CONFIG_NET_SCH_FORCE_GAP)
-		if (q->last)
-			goto min_gap;
 #endif
-		skb = cl->qdisc->ops->dequeue(cl->qdisc);
-		if (skb == NULL)
-			return NULL;	/* nothing to send */
+#ifndef CONFIG_NET_SCH_PSP_PKT_GAP
+			FORCE_GAP;
+#endif
+			skb = cl->qdisc->ops->dequeue(cl->qdisc);
+			if (skb == NULL)
+				return NULL;	/* nothing to send */
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-		if (psp_tstamp(skb) > q->clock) {
-			cl->skb = skb;
-			goto lookup;
+			if (psp_tstamp(skb) > q->clock) {
+				cl->skb = skb;
+				goto lookup;
+			}
+			FORCE_GAP;
 		}
-#ifdef CONFIG_NET_SCH_FORCE_GAP
-		if (q->last)
-			goto min_gap;
 #endif
+		sch->q.qlen--;
+		update_clocks(skb, sch, cl);
+		return skb;
 	}
-#endif
-	sch->q.qlen--;
-	update_clocks(skb, sch, cl);
-	return skb;
-}
 
 	/* per-packet gap on interface */
-gapsize -= min_t(unsigned long, gapsize, q->hw_gap);
+	gapsize -= min_t(unsigned long, gapsize, q->hw_gap);
 	/* clone a gap packet */
-gapsize =
-max_t(int, gapsize,
-      sizeof(struct gaphdr) + (HW_GAP(q) + FCS)) - (HW_GAP(q) + FCS);
-gap:
-skb = skb_clone(q->gap, GFP_ATOMIC);
-if (unlikely(!skb))
-	goto noclone;
-skb_trim(skb, gapsize);
-q->xstats.bytes += gapsize;
-q->xstats.packets++;
-q->clock += q->hw_gap;
-update_clocks(skb, sch, NULL);
-return skb;
+	gapsize =
+	    max_t(int, gapsize,
+		  sizeof(struct gaphdr) + (HW_GAP(q) + FCS)) - (HW_GAP(q) +
+								FCS);
+      gap:
+	skb = skb_clone(q->gap, GFP_ATOMIC);
+	if (unlikely(!skb))
+		goto noclone;
+	skb_trim(skb, gapsize);
+	q->xstats.bytes += gapsize;
+	q->xstats.packets++;
+	q->clock += q->hw_gap;
+	update_clocks(skb, sch, NULL);
+	return skb;
 #ifdef CONFIG_NET_SCH_FORCE_GAP
-min_gap:
+      min_gap:
 	/* remember class/packet and insert minimal gap before */
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-cl->skb = skb;
+	cl->skb = skb;
 #endif
-q->wait = cl;
-gapsize = sizeof(struct gaphdr);
-goto gap;
+	q->wait = cl;
+	gapsize = sizeof(struct gaphdr);
+	goto gap;
 
 #endif
-noclone:
-printk(KERN_ERR "psp: cannot clone a gap packet.\n");
-return NULL;
+      noclone:
+	printk(KERN_ERR "psp: cannot clone a gap packet.\n");
+	return NULL;
 }
 
 static unsigned int psp_drop(struct Qdisc *sch)
