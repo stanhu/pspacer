@@ -57,3 +57,15 @@ config NET_SCH_PSP_RRR
 	 Say Y to trying to distribute traffic across multiple outgoing
 	 channels by TCP retransmissions. Also use packet editing to change
 	 destination MACs on leaf.
+
+config NET_SCH_PSP_FORCE_GAP
+	bool "Enable minimal gap between every two packets"
+	depends on NET_SCH_PSP
+	---help---
+	 Say Y to enable at least minimal (64 bits in standard Ethernet) gap
+	 between every two data packets.
+	 This may break (or no) some too intellectual new Ethernet features
+	 like some types of segmentations to improve rate precision with
+	 price of little channel overhead.
+
+	 If unsure in your Ethernet hardware - say Y.
