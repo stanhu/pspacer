@@ -1874,13 +1874,6 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 	return err;
 }
 
-/* lindent problem */
-#ifdef CONFIG_NET_SCH_FORCE_GAP
-#define FORCE_GAP if (q->last) goto min_gap;
-#else
-#define FORCE_GAP ;
-#endif
-
 static int psp_requeue(struct sk_buff *skb, struct Qdisc *sch)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
@@ -1931,7 +1924,10 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 		if (skb == NULL) {
 #endif
 #ifndef CONFIG_NET_SCH_PSP_PKT_GAP
-			FORCE_GAP;
+#ifdef CONFIG_NET_SCH_FORCE_GAP
+			if (q->last)
+				goto min_gap;
+#endif
 #endif
 			skb = cl->qdisc->ops->dequeue(cl->qdisc);
 			if (skb == NULL)
@@ -1941,7 +1937,10 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 				cl->skb = skb;
 				goto lookup;
 			}
-			FORCE_GAP;
+#ifdef CONFIG_NET_SCH_FORCE_GAP
+			if (q->last)
+				goto min_gap;
+#endif
 		}
 #endif
 		sch->q.qlen--;
@@ -2029,6 +2028,9 @@ static void psp_reset(struct Qdisc *sch)
 		}
 	}
 
+#ifdef CONFIG_NET_SCH_FORCE_GAP
+	q->last = q->wait = NULL;
+#endif
 	__skb_queue_purge(&q->requeue);
 	INIT_LIST_HEAD(&q->drop_list);
 	sch->q.qlen = 0;
@@ -2185,8 +2187,12 @@ static void psp_destroy_class(struct Qdisc *sch, struct psp_class *cl)
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *pos, *next;
 
-	if (q->defclass == cl)
-		q->defclass = PSP_DIRECT;
+#define UNCLASS(f,z) if(q->f == cl) q->f = z;
+	UNCLASS(defclass, PSP_DIRECT);
+#ifdef CONFIG_NET_SCH_FORCE_GAP
+	UNCLASS(last, NULL);
+	UNCLASS(wait, NULL);
+#endif
 	if (cl->parent)
 		cl->parent->allocated_rate -= cl->max_rate;
 	else
@@ -2226,8 +2232,11 @@ static void psp_destroy_class(struct Qdisc *sch, struct psp_class *cl)
 		kfree_skb(cl->skb);
 		cl->skb = NULL;
 	}
-	if (q->defclass == cl)
-		q->defclass = PSP_DIRECT;
+	UNCLASS(defclass, PSP_DIRECT);
+#ifdef CONFIG_NET_SCH_FORCE_GAP
+	UNCLASS(last, NULL);
+	UNCLASS(wait, NULL);
+#endif
 	tcphash_free(cl->tcphash);
 	tree_free(&cl->iptree);
 #ifdef CONFIG_IPV6
