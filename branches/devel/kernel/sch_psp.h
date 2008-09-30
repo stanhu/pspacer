@@ -25,6 +25,7 @@ struct tc_psp_copt {
 	__u32 chk;		/* length of tc_psp_copt to version verify */
 	__u32 level;
 	__u32 mode;
+#define TC_PSP_MODE_TEST	(8)
 #define TC_PSP_MODE_NORMAL	(0)
 #define TC_PSP_MODE_STATIC	(1)
 #define TC_PSP_MODE_STATIC_RATE	(2)
