@@ -69,3 +69,13 @@ config NET_SCH_PSP_FORCE_GAP
 	 price of little channel overhead.
 
 	 If unsure in your Ethernet hardware - say Y.
+
+config NET_SCH_PSP_FAST_SORT
+	bool "Enable fast sorting (with hints) for pfifo leafs"
+	depends on NET_SCH_PSP
+	---help---
+	 Say Y to enable fast packet sorting under "retransmission" modes
+	 on pfifo leafs.
+
+	 If you have very fast busy network, only PFIFO leafs and
+	 use retransmission correction modes - try Y.

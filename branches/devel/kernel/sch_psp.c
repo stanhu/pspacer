@@ -65,13 +65,14 @@
 #define FCS    (4)		/* Frame Check Sequence(4) */
 #define MIN_TARGET_RATE (1000)	/* 1 KBytes/sec */
 
-/* remove next 6 lines before kernel inclusion ;) */
+/* remove next 7 lines before kernel inclusion ;) */
 //#define CONFIG_NET_SCH_PSP_PKT_GAP
 //#define CONFIG_NET_SCH_PSP_NO_SYN_FAIRNESS
 //#define CONFIG_NET_SCH_PSP_NO_TTL
 //#define CONFIG_NET_SCH_PSP_RRR
 //#define CONFIG_NET_SCH_PSP_EST
-//#define CONFIG_NET_SCH_FORCE_GAP
+//#define CONFIG_NET_SCH_PSP_FORCE_GAP
+//#define CONFIG_NET_SCH_PSP_FAST_SORT
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 #define PSP_HSIZE (16)
@@ -94,7 +95,7 @@
 #define SYN_WEIGHT (1)		/* 1 syn == len<<SYN_WEIGHT retransmissions (or undef) */
 #endif
 
-#define EWMA_DEFAULT (10000)	/* nsec */
+#define EWMA_DEFAULT (1000000)	/* nsec */
 
 #undef gap_u64			/* I prefer undef for 32bit and normal gaps */
 
@@ -105,9 +106,6 @@ typedef u64 clock_delta;
 #else
 typedef unsigned long clock_delta;
 #endif
-
-#define psp_tstamp(skb) (*(u64*)(&(skb)->cb[36]))
-#define SKB_BACKSIZE(skb) (*(u32*)(&(skb)->cb[44]))
 
 static int debug __read_mostly;
 module_param(debug, int, 0644);
@@ -190,6 +188,18 @@ struct hashitem {
 #endif
 };
 
+#define HINT_BITS 5
+
+struct psp_skb_cb {
+	u64 clock;
+	u32 backsize;
+	struct list_head hint[0];
+};
+
+#define NHINTS ((48-sizeof(struct psp_skb_cb))/sizeof(struct list_head))
+#define psp_tstamp(skb) (((struct psp_skb_cb *)(&(skb)->cb))->clock)
+#define SKB_BACKSIZE(skb) (((struct psp_skb_cb *)(&(skb)->cb))->backsize)
+
 #define HBITS 16
 #define HSIZE (1ULL<<HBITS)
 
@@ -268,12 +278,15 @@ struct psp_class {
 	u32 back_id;
 	struct est_data back_bps;
 
-	u64 phaze_time;
 	u64 phaze_bytes;
-	unsigned int ewma;
+	unsigned long ewma;
 
 	struct list_head rlist;	/* retransmission round-robin */
 	int weight, weight_sum;
+
+	/* update_clocks() runtime */
+	u64 t;
+	struct psp_class *prev;
 };
 
 struct psp_sched_data {
@@ -314,14 +327,15 @@ struct psp_sched_data {
 	u64 clock0;
 
 	int phaze_idle;
-	u64 phaze_time;
-	unsigned int ewma;
+	u64 time;
+	clock_delta phaze_time;
+	unsigned long ewma;
 	struct est_data bps;	/* rate estimator data */
 	struct est_data pps;
 
 	struct sk_buff *gap;	/* template of gap packets */
 	struct tc_psp_xstats xstats;	/* psp specific stats */
-#ifdef CONFIG_NET_SCH_FORCE_GAP
+#ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 	struct psp_class *last, *wait;
 #endif
 };
@@ -807,29 +821,48 @@ static void add_leaf_class(struct psp_sched_data *q, struct psp_class *cl)
 #endif
 
 static inline unsigned long calc_rate_(struct est_data *e, clock_delta time,
-				       clock_delta val, unsigned int hz,
-				       unsigned int ewma)
+				       clock_delta val, unsigned long hz,
+				       unsigned long ewma)
 {
-	u64 r = 0;
-
-	if (time > ewma || !e->av)
-		ewma = time;
-	r = e->av * (u64) (ewma - time) + (u64) val *hz;
-	if (ewma) {
-		do_div(r, ewma);
-		if (r) {
-			e->av = r;
-			e->time += time;
-			e->data += val;
-		}
+#if 0
+	u64 r=0;
+	if(time) {
+	    r=((u64)val) * hz;
+	    do_div(r,time);
+	    ewma=DIV_ROUND_UP(ewma,time);
+	    r+=e->av*(ewma-1);
+	    do_div(r,ewma);
+	    e->av=r;
+	};
+	return r;
+#else
+	u64 r = ((u64)val) * hz;
+	if(time>ewma) {
+		do_div(r,time);
+		e->av=r;
+	} else {
+		if (e->av) r+=((u64)e->av)*(ewma-time);
+		else ewma=time;
+		if(ewma) {
+			do_div(r,ewma);
+			e->av=r;
+		}else r=0;
 	}
 	return r;
+#endif
 }
 
 static inline unsigned long calc_rate(struct est_data *e, u64 time, u64 val,
-				      unsigned int hz, unsigned int ewma)
+				      unsigned long hz, unsigned long ewma)
 {
-	return calc_rate_(e, time - e->time, val - e->data, hz, ewma);
+	clock_delta t=time - e->time;
+	unsigned long rate = calc_rate_(e, t, val - e->data, hz, ewma);
+
+	if(rate || t>=ewma) {
+		e->time=time;
+		e->data=val;
+	}
+	return rate;
 }
 
 static inline void reset_est(struct est_data *e, u64 time, u64 val)
@@ -844,35 +877,29 @@ static inline unsigned long estimate_qdisc_rate(struct Qdisc *sch,
 {
 	if (q->clock != q->clock0) {
 		/* enqueue -> dequeue series, very precise time to rate estimation */
-		q->phaze_time = _TIMER;	/* save this time to classes */
+		u64 t = _TIMER;
+
+		q->phaze_time = t - q->time;
+		q->time = t;	/* save this time to classes */
 		if (q->phaze_idle)
-			reset_est(&q->bps, q->phaze_time, q->clock);
-		else if (calc_rate
-			 (&q->bps, q->phaze_time, q->clock, _TIMER_HZ, q->ewma))
+			reset_est(&q->bps, t, q->clock);
+		else if (calc_rate(&q->bps, t, q->clock, _TIMER_HZ, q->ewma))
 			sch->rate_est.bps = q->bps.av;
 	}
 	return q->bps.av;
 }
 
-#if 1
-#define CLASS_TIMER (q->clock)
-#define CLASS_TIMER_HZ (max_rate)
-#define CLASS_TIMER_BAD (q->phaze_idle)
-#else
-#define CLASS_TIMER (q->phaze_time)
-#define CLASS_TIMER_HZ (_TIMER_HZ)
-#define CLASS_TIMER_BAD (0)
-#endif
 static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 				 struct psp_class *cl)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
 	clock_delta len[2] = { skb->len, SKB_BACKSIZE(skb) },
 	    hw_gap = HW_GAP(q) + FCS, t0 = skb->len + hw_gap;
-	u64 t;
+	u64 t,tt[3]={0,0,0};
 	unsigned long max_rate = q->max_rate, rate;
+	struct psp_class *cl1=NULL;
 
-#ifdef CONFIG_NET_SCH_FORCE_GAP
+#ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 	q->last = cl;
 #endif
 
@@ -886,6 +913,9 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 #endif
 	/* child are independent again */
 	for (; cl; cl = cl->parent) {
+		cl->prev=cl1;
+		cl->t=0;
+		cl1=cl;
 		rate = cl->rate;
 		t = len[cl->direction];
 		if ((cl->state & FLAG_DMARK)) {
@@ -894,43 +924,49 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			cl->clock = q->clock;
 			cl->tail = 0;
 		}
-		if (CLASS_TIMER_BAD) {
-			/* wall clock are dirty, just reset estimators */
+		if (q->phaze_idle) {
+			/* wall clock are dirty */
 			if (rate == 1) {
 				rate = cl->bps.av;
-				reset_est(&cl->bps, q->phaze_time, 0);
+				reset_est(&cl->bps, q->time, 0);
 			}
 #ifdef CONFIG_NET_SCH_PSP_EST
 			else {
-				reset_est(&cl->bps, CLASS_TIMER,
+				/* calc rate by realtime & reset estimator */
+				calc_rate_(&cl->bps,q->phaze_time,
+					cl->phaze_bytes-cl->bps.data,_TIMER_HZ,
+					mul_div(cl->ewma,_TIMER_HZ,max_rate));
+				reset_est(&cl->bps, q->clock,
 					  cl->phaze_bytes);
-				cl->phaze_bytes += t + cl->hw_gap;
 			}
 #endif
 		} else if (rate == 1) {
 			/* estimate class rate by enqueue ("backlog must be sent") */
-			if (q->phaze_time > cl->bps.time)
+			if (q->time > cl->bps.time)
 				calc_rate_(&cl->bps,
-					   q->phaze_time - cl->bps.time,
+					   q->time - cl->bps.time,
 					   QSTATS(cl).backlog, _TIMER_HZ, 0);
-			rate = cl->qdisc->rate_est.bps = cl->bps.av;
+				cl->bps.time=q->time;
+			cl->qdisc->rate_est.bps = rate = cl->bps.av;
 		}
 #ifdef CONFIG_NET_SCH_PSP_EST
 		else {
 			/* estimate real class rate */
 			if (calc_rate
-			    (&cl->bps, CLASS_TIMER, cl->phaze_bytes,
-			     CLASS_TIMER_HZ, cl->ewma)) {
+			    (&cl->bps, q->clock, cl->phaze_bytes,
+			     max_rate, cl->ewma)) {
 				/* psp_class_est(cl,cl->bps.etime); */
-				cl->qdisc->rate_est.bps = cl->bps.av;
 			}
-			cl->phaze_bytes += t + cl->hw_gap;
 		}
+		cl->qdisc->rate_est.bps = cl->bps.av;
 #endif
 		/* recalculate gapsize */
 		if (!t)
 			goto gap0;
 		t += cl->hw_gap;
+#ifdef CONFIG_NET_SCH_PSP_EST
+		cl->phaze_bytes += t;
+#endif
 		switch (cl->state & MAJOR_MODE_MASK) {
 		case TC_PSP_MODE_ESTIMATED_DATA:
 			if (!rate)
@@ -966,6 +1002,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			t = t * max_rate + cl->tail;
 			cl->tail = do_div(t, rate);
 #endif
+			cl->t=t;
 			break;
 		case TC_PSP_MODE_TEST:
 			cl->rate = cl->max_rate = cl->bps.av;
@@ -986,6 +1023,14 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 				  QSTATS(cl).backlog);
 	}
 	q->clock0 = q->clock += t0;
+	for(; cl1; cl1=cl1->prev){
+		t=cl1->t;
+		if(!t)
+		    continue;
+		cl1->clock-=tt[cl1->direction];
+		tt[cl1->direction]+=t;
+		tt[cl1->direction+1]+=t;
+	}
 }
 
 /*
@@ -1046,10 +1091,9 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 	u64 clock, nextclock;
 
 	list_for_each_entry(cl, list, plist) {
-		if (!(cl->state & FLAG_ACTIVE)) {
-			if (cl->clock <= q->clock)
+		if (cl->clock <= q->clock && !(cl->state & FLAG_ACTIVE))
 				cl->state |= FLAG_DMARK;
-		} else if (!cl->level) {
+		else if (!cl->level) {
 			clock = max_clock(cl);
 			if (next == NULL || nextclock > clock ||
 			    (nextclock == clock && next->clock > cl->clock)) {
@@ -1632,7 +1676,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	if (TH->ack) {
 	      next_aseq:
 		if (aseq > h->ack_seq
-		    && ((TH->fin | TH->rst | TH->psh | TH->syn) == 0)
+//		    && ((TH->fin | TH->rst | TH->psh | TH->syn) == 0)
+		    && ((TH->fin | TH->rst) == 0)
 		    && (x = q->mtu - hdr_size)) {
 			SKB_BACKSIZE(skb) = be16_to_cpu(TH->window);
 			SKB_BACKSIZE(skb) +=
@@ -1705,6 +1750,112 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	return rrr;
 }
 
+#ifdef CONFIG_NET_SCH_PSP_FAST_SORT
+static inline void hints_init(struct sk_buff *skb)
+{
+	struct psp_skb_cb *s = (struct psp_skb_cb *)&skb->cb;
+#if 0
+	int i;
+
+	for(i=NHINTS-1; i>=0; i--)
+	    INIT_LIST_HEAD(&s->hint[i]);
+#else
+	s->hint[0].prev=NULL;
+#endif
+}
+
+static inline void hints_delete(struct sk_buff *skb)
+{
+	struct psp_skb_cb *s = (struct psp_skb_cb *)&skb->cb;
+	int i;
+
+	if(s->hint[0].prev)
+	    for(i=NHINTS-1; i>=0; i--)
+		list_del_init(&s->hint[i]);
+}
+
+static inline void __skb_queue_tstamp(struct sk_buff_head *list,
+				      struct sk_buff *newsk)
+{
+	struct sk_buff *prev = ((struct sk_buff *)list)->prev;
+	struct psp_skb_cb *s = (struct psp_skb_cb *)&newsk->cb;
+	struct psp_skb_cb *slast,*s1;
+	int i;
+	u64 h,h1;
+
+	if(prev == (struct sk_buff *)list) {
+	    for(i=NHINTS-1; i>=0; i--) 
+		INIT_LIST_HEAD(&s->hint[i]);
+	    goto queue;
+	}
+	s1 = slast = (struct psp_skb_cb *)&prev->cb;
+	for(i=NHINTS-1; i>=0; i--) {
+		/* s - new packet cb, s1 - found hint/packet cb */
+		h=s->clock>>(HINT_BITS*(i+1));
+	next_hint:
+		h1=s1->clock>>(HINT_BITS*(i+1));
+		if(h1>h){
+		    /* look next */
+		    s1=container_of(s1->hint[i].next,struct psp_skb_cb,hint[i]);
+		    if(s1!=slast)
+			goto next_hint;
+		    /* end/start of list, we are the new hint */
+		    list_add_tail(&s->hint[i],&s1->hint[i]);
+		    s1=container_of(s->hint[i].prev,struct psp_skb_cb,hint[i]);
+		} else if(h1<h) {
+			list_add_tail(&s->hint[i],&s1->hint[i]);
+			if(s1!=slast)
+			    s1=container_of(s->hint[i].prev,struct psp_skb_cb,hint[i]);
+		} else if(s->clock>=s1->clock && !list_empty(&s1->hint[i])) {
+			list_replace_init(&s1->hint[i],&s->hint[i]);
+			if(s1!=slast)
+			    s1=container_of(s->hint[i].prev,struct psp_skb_cb,hint[i]);
+		} else INIT_LIST_HEAD(&s->hint[i]);
+	}
+
+	for (prev=container_of((void *)s1,struct sk_buff,cb);
+	    prev != (struct sk_buff *)list
+		&& psp_tstamp(prev) > s->clock; prev = prev->prev)
+		/* nothing */ ;
+queue:
+	__skb_queue_after(list, prev, newsk);
+}
+
+static inline struct sk_buff_head *fifo_requeue_tail(struct sk_buff *skb)
+{				/* must be tail */
+	struct sk_buff_head *list = (struct sk_buff_head *)skb->next;
+	struct sk_buff *prev=(struct sk_buff *)skb->prev;
+	struct psp_skb_cb *s = (struct psp_skb_cb *)&skb->cb;
+	struct psp_skb_cb *slast, *s1;
+	int i;
+	u64 h,h1;
+
+	if(list==(struct sk_buff_head *)skb || !list)
+	    return NULL;
+	if(list==(struct sk_buff_head *)prev) {
+	    for(i=NHINTS-1; i>=0; i--) 
+		INIT_LIST_HEAD(&s->hint[i]);
+	    return list;
+	}
+	slast = (struct psp_skb_cb *)&prev->cb;;
+	for(i=NHINTS-1; i>=0; i--) {
+		/* s - new packet cb, s1 - tail hint cb */
+		h=s->clock>>(HINT_BITS*(i+1));
+		s1=container_of(slast->hint[i].prev,struct psp_skb_cb,hint[i]);
+		h1=s1->clock>>(HINT_BITS*(i+1));
+		if(h1>h)
+		    list_add_tail(&s->hint[i],&slast->hint[i]);
+		else if(list_empty(&s->hint[i]))
+		    INIT_LIST_HEAD(&s->hint[i]);
+		else
+		    list_replace_init(&s1->hint[i],&s->hint[i]);
+	}
+	__skb_queue_head(list, __skb_dequeue_tail(list));
+	return list;
+}
+#else
+#define hints_delete(skb) ;
+#define hints_init(skb) ;
 static inline void __skb_queue_tstamp(struct sk_buff_head *list,
 				      struct sk_buff *newsk)
 {
@@ -1717,17 +1868,6 @@ static inline void __skb_queue_tstamp(struct sk_buff_head *list,
 	__skb_queue_after(list, prev, newsk);
 }
 
-static inline struct sk_buff_head *fifo_tstamp_sort(struct sk_buff *skb)
-{				/* must be tail */
-	struct sk_buff_head *list = (struct sk_buff_head *)skb->next;
-
-	if (list && list != (struct sk_buff_head *)skb) {
-		__skb_queue_tstamp(list, __skb_dequeue_tail(list));
-		return list;
-	}
-	return NULL;
-}
-
 static inline struct sk_buff_head *fifo_requeue_tail(struct sk_buff *skb)
 {				/* must be tail */
 	struct sk_buff_head *list = (struct sk_buff_head *)skb->next;
@@ -1736,6 +1876,19 @@ static inline struct sk_buff_head *fifo_requeue_tail(struct sk_buff *skb)
 		__skb_queue_head(list, __skb_dequeue_tail(list));
 		return list;
 	}
+	return NULL;
+}
+#endif
+
+static inline struct sk_buff_head *fifo_tstamp_sort(struct sk_buff *skb)
+{				/* must be tail */
+	struct sk_buff_head *list = (struct sk_buff_head *)skb->next;
+
+	if (list && list != (struct sk_buff_head *)skb) {
+		__skb_queue_tstamp(list, __skb_dequeue_tail(list));
+		return list;
+	}
+
 	return NULL;
 }
 
@@ -1835,6 +1988,7 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 			goto stat;
 		}
 
+		hints_init(skb);
 		if (cl1) {
 			struct sk_buff_head *list;
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
@@ -1846,6 +2000,7 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 			/* if there are OUR pfifo - drop [limit] oldest packet */
 			if (list == &cl->qdisc->q
 			    && list->qlen == qdisc_dev(sch)->tx_queue_len) {
+				hints_delete(cl->qdisc->q.prev);
 				l = cl->qdisc->ops->drop(cl->qdisc);
 				len[0] -= l;	/* ??? */
 				len[1] -= l;
@@ -1910,7 +2065,7 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 	}
       lookup:
 	/* normal/pacing class */
-#ifdef CONFIG_NET_SCH_FORCE_GAP
+#ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 	if ((cl = q->wait))
 		q->wait = NULL;
 	else
@@ -1924,12 +2079,14 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 		if (skb == NULL) {
 #endif
 #ifndef CONFIG_NET_SCH_PSP_PKT_GAP
-#ifdef CONFIG_NET_SCH_FORCE_GAP
+#ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 			if (q->last)
 				goto min_gap;
 #endif
 #endif
 			skb = cl->qdisc->ops->dequeue(cl->qdisc);
+			hints_delete(skb);
+
 			if (skb == NULL)
 				return NULL;	/* nothing to send */
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
@@ -1937,7 +2094,7 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 				cl->skb = skb;
 				goto lookup;
 			}
-#ifdef CONFIG_NET_SCH_FORCE_GAP
+#ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 			if (q->last)
 				goto min_gap;
 #endif
@@ -1965,7 +2122,7 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 	q->clock += q->hw_gap;
 	update_clocks(skb, sch, NULL);
 	return skb;
-#ifdef CONFIG_NET_SCH_FORCE_GAP
+#ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
       min_gap:
 	/* remember class/packet and insert minimal gap before */
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
@@ -2028,7 +2185,7 @@ static void psp_reset(struct Qdisc *sch)
 		}
 	}
 
-#ifdef CONFIG_NET_SCH_FORCE_GAP
+#ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 	q->last = q->wait = NULL;
 #endif
 	__skb_queue_purge(&q->requeue);
@@ -2133,7 +2290,7 @@ static int psp_init(struct Qdisc *sch, struct nlattr *opt)
 #endif
 	q->defclass = PSP_DIRECT;
 	q->ifg = 12;		/* default ifg is 12 byte. */
-	q->ewma = EWMA_DEFAULT;
+	q->ewma = mul_div(EWMA_DEFAULT,_TIMER_HZ,NSEC_PER_SEC);
 	i = psp_change(sch, opt);
 	if (i) {
 		printk(KERN_ERR "psp: change failed.\n");
@@ -2189,7 +2346,7 @@ static void psp_destroy_class(struct Qdisc *sch, struct psp_class *cl)
 
 #define UNCLASS(f,z) if(q->f == cl) q->f = z;
 	UNCLASS(defclass, PSP_DIRECT);
-#ifdef CONFIG_NET_SCH_FORCE_GAP
+#ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 	UNCLASS(last, NULL);
 	UNCLASS(wait, NULL);
 #endif
@@ -2233,7 +2390,7 @@ static void psp_destroy_class(struct Qdisc *sch, struct psp_class *cl)
 		cl->skb = NULL;
 	}
 	UNCLASS(defclass, PSP_DIRECT);
-#ifdef CONFIG_NET_SCH_FORCE_GAP
+#ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 	UNCLASS(last, NULL);
 	UNCLASS(wait, NULL);
 #endif
@@ -2464,9 +2621,7 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 		memset(cl, 0, sizeof(struct psp_class));
 		cl->sch = sch;
 		cl->refcnt = 1;
-		cl->ewma =
-		    mul_div(q->max_rate == 1 ? q->bps.av : q->max_rate,
-			    NSEC_PER_SEC, EWMA_DEFAULT);
+		cl->ewma = mul_div(EWMA_DEFAULT,q->max_rate == 1 ? q->bps.av : q->max_rate,NSEC_PER_SEC);
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 		INIT_LIST_HEAD(&cl->sibling);
 		INIT_LIST_HEAD(&cl->hlist);
