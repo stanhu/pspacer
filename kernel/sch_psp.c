@@ -74,7 +74,6 @@
 //#define CONFIG_NET_SCH_PSP_FORCE_GAP
 //#define CONFIG_NET_SCH_PSP_FAST_SORT
 
-
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 #define PSP_HSIZE (16)
 #else
@@ -1756,6 +1755,14 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 }
 
 #ifdef CONFIG_NET_SCH_PSP_FAST_SORT
+
+#if HINT_BITS == 4
+/* no sense with "-funroll-loops", but I help you too (; */
+#define HINT(s,i) ((s)->clock >> (((i) + 1) << 2))
+#else
+#define HINT(s,i) ((s)->clock >> (HINT_BITS * ((i) + 1)))
+#endif
+
 static inline void hints_init(struct sk_buff *skb)
 {
 	struct psp_skb_cb *s = (struct psp_skb_cb *)&skb->cb;
@@ -1782,7 +1789,7 @@ static inline void hints_delete(struct sk_buff *skb)
 static inline void __skb_queue_tstamp(struct sk_buff_head *list,
 				      struct sk_buff *newsk)
 {
-	struct sk_buff *prev = ((struct sk_buff *)list)->prev;
+	struct sk_buff *prev = list->prev;
 	struct psp_skb_cb *s = (struct psp_skb_cb *)&newsk->cb;
 	struct psp_skb_cb *slast, *s1;
 	int i;
@@ -1796,9 +1803,9 @@ static inline void __skb_queue_tstamp(struct sk_buff_head *list,
 	s1 = slast = (struct psp_skb_cb *)&prev->cb;
 	for (i = NHINTS - 1; i >= 0; i--) {
 		/* s - new packet cb, s1 - found hint/packet cb */
-		h = s->clock >> (HINT_BITS * (i + 1));
+		h = HINT(s,i);
 	      next_hint:
-		h1 = s1->clock >> (HINT_BITS * (i + 1));
+		h1 = HINT(s1,i);
 		if (h1 > h) {
 			/* look next */
 			s1 = container_of(s1->hint[i].next, struct psp_skb_cb,
@@ -1831,10 +1838,11 @@ static inline void __skb_queue_tstamp(struct sk_buff_head *list,
 	__skb_queue_after(list, prev, newsk);
 }
 
+/* something wrong? */
 static inline struct sk_buff_head *fifo_requeue_tail(struct sk_buff *skb)
 {				/* must be tail */
 	struct sk_buff_head *list = (struct sk_buff_head *)skb->next;
-	struct sk_buff *prev = (struct sk_buff *)skb->prev;
+	struct sk_buff *prev = skb->prev;
 	struct psp_skb_cb *s = (struct psp_skb_cb *)&skb->cb;
 	struct psp_skb_cb *slast, *s1;
 	int i;
@@ -1847,16 +1855,16 @@ static inline struct sk_buff_head *fifo_requeue_tail(struct sk_buff *skb)
 			INIT_LIST_HEAD(&s->hint[i]);
 		return list;
 	}
-	slast = (struct psp_skb_cb *)&prev->cb;;
+	slast = (struct psp_skb_cb *)&prev->cb;
 	for (i = NHINTS - 1; i >= 0; i--) {
-		/* s - new packet cb, s1 - tail hint cb */
-		h = s->clock >> (HINT_BITS * (i + 1));
+		/* s - new packet cb, s1 - tail (first) hint cb */
+		h = HINT(s,i);
 		s1 = container_of(slast->hint[i].prev, struct psp_skb_cb,
 				  hint[i]);
-		h1 = s1->clock >> (HINT_BITS * (i + 1));
+		h = HINT(s1,i);
 		if (h1 > h)
 			list_add_tail(&s->hint[i], &slast->hint[i]);
-		else if (list_empty(&s->hint[i]))
+		else if (s1 == slast)
 			INIT_LIST_HEAD(&s->hint[i]);
 		else
 			list_replace_init(&s1->hint[i], &s->hint[i]);
@@ -1864,9 +1872,33 @@ static inline struct sk_buff_head *fifo_requeue_tail(struct sk_buff *skb)
 	__skb_queue_head(list, __skb_dequeue_tail(list));
 	return list;
 }
+
+static inline void hints_unlink_tail(struct sk_buff_head *list)
+{
+	/* old - old tail (to remove), new - new tail */
+	struct sk_buff *old = list->prev;
+	struct sk_buff *new = old->prev;
+	int i;
+
+	if ((struct sk_buff_head *)new != list) {
+		struct psp_skb_cb *s = (struct psp_skb_cb *)&old->cb;
+		struct psp_skb_cb *s1 = (struct psp_skb_cb *)&new->cb;
+
+		for (i = NHINTS - 1; i >= 0; i--) {
+			if (s->hint[i].next == &s1->hint[i])
+				list_del_init(&s->hint[i]);
+			else if (list_empty(&s->hint[i]))
+				INIT_LIST_HEAD(&s1->hint[i]);
+			else
+				list_replace_init(&s->hint[i], &s1->hint[i]);
+		}
+	}
+}
+
 #else
 #define hints_delete(skb) ;
 #define hints_init(skb) ;
+#define hints_unlink_tail(list) ;
 static inline void __skb_queue_tstamp(struct sk_buff_head *list,
 				      struct sk_buff *newsk)
 {
@@ -2002,17 +2034,28 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 		hints_init(skb);
 		if (cl1) {
 			struct sk_buff_head *list;
+			struct Qdisc *leaf;
+
+#ifndef CONFIG_NET_SCH_PSP_FAST_SORT
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
 			if (skb1)
 				list = fifo_requeue_tail(skb);
 			else
 #endif
+#endif
 				list = fifo_tstamp_sort(skb);
+#ifdef CONFIG_NET_SCH_PSP_FAST_SORT
+			/* drop any pfifo over-[limit] */
+			if (list && list->qlen == qdisc_dev(sch)->tx_queue_len) {
+				leaf = container_of(list, struct Qdisc, q);
+#else
 			/* if there are OUR pfifo - drop [limit] oldest packet */
-			if (list == &cl->qdisc->q
+			if (list == &(leaf = cl->qdisc)->q
 			    && list->qlen == qdisc_dev(sch)->tx_queue_len) {
-				hints_delete(cl->qdisc->q.prev);
-				l = cl->qdisc->ops->drop(cl->qdisc);
+				leaf = cl->qdisc;
+#endif
+				hints_unlink_tail(list);
+				l = leaf->ops->drop(cl->qdisc);
 				len[0] -= l;	/* ??? */
 				len[1] -= l;
 				npkt = 0;
