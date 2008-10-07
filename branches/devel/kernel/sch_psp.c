@@ -985,13 +985,16 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		case TC_PSP_MODE_ESTIMATED:
 		case TC_PSP_MODE_ESTIMATED_GAP:
 		case TC_PSP_MODE_STATIC:
+			/* hardware/ethernet */
 			if (!rate)
 				goto gap0;
 			/* gap-safe, always round up */
 			t = t * max_rate + rate - 1;
 			do_div(t, rate);
+			cl->t = t;
 			break;
 		case TC_PSP_MODE_STATIC_RATE:
+			/* software/router/isp */
 			if (!rate)
 				goto gap0;
 #if 0
@@ -1002,11 +1005,22 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 				t++;
 			}
 #else
-			/* rate-safe & fast */
-			t = t * max_rate + cl->tail;
-			cl->tail = do_div(t, rate);
+			if(cl->hw_gap == 0) {
+			    /* rate-safe & fast */
+			    t = t * max_rate + cl->tail;
+			    cl->tail = do_div(t, rate);
+			    break;
+			}
+			/* cl->hw_gap - destination router HZ */
+#ifdef CONFIG_NET_SCH_PSP_EST
+			cl->phaze_bytes -= cl->hw_gap;
 #endif
-			cl->t = t;
+			/* rounds up to destination timer quantum */
+			t=(t-cl->hw_gap)*cl->hw_gap+rate-1;
+			do_div(t,rate);
+			t=t*max_rate+cl->tail;
+			cl->tail=do_div(t,cl->hw_gap);
+#endif
 			break;
 		case TC_PSP_MODE_TEST:
 			cl->rate = cl->max_rate = cl->bps.av;
@@ -1803,9 +1817,9 @@ static inline void __skb_queue_tstamp(struct sk_buff_head *list,
 	s1 = slast = (struct psp_skb_cb *)&prev->cb;
 	for (i = NHINTS - 1; i >= 0; i--) {
 		/* s - new packet cb, s1 - found hint/packet cb */
-		h = HINT(s,i);
+		h = HINT(s, i);
 	      next_hint:
-		h1 = HINT(s1,i);
+		h1 = HINT(s1, i);
 		if (h1 > h) {
 			/* look next */
 			s1 = container_of(s1->hint[i].next, struct psp_skb_cb,
@@ -1858,10 +1872,10 @@ static inline struct sk_buff_head *fifo_requeue_tail(struct sk_buff *skb)
 	slast = (struct psp_skb_cb *)&prev->cb;
 	for (i = NHINTS - 1; i >= 0; i--) {
 		/* s - new packet cb, s1 - tail (first) hint cb */
-		h = HINT(s,i);
+		h = HINT(s, i);
 		s1 = container_of(slast->hint[i].prev, struct psp_skb_cb,
 				  hint[i]);
-		h = HINT(s1,i);
+		h = HINT(s1, i);
 		if (h1 > h)
 			list_add_tail(&s->hint[i], &slast->hint[i]);
 		else if (s1 == slast)
