@@ -239,7 +239,7 @@ struct psp_class {
 
 	struct tcf_proto *filter_list;	/* filter list */
 	int filter_cnt;		/* filter count */
-	long hw_gap;		/* inter frame gap + preamble + FCS */
+	u32 hw_gap;		/* inter frame gap + preamble + FCS */
 
 	struct list_head dlist;	/* drop list */
 	struct list_head plist;	/* normal/pacing class qdisc list */
@@ -1005,21 +1005,21 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 				t++;
 			}
 #else
-			if(cl->hw_gap == 0) {
-			    /* rate-safe & fast */
-			    t = t * max_rate + cl->tail;
-			    cl->tail = do_div(t, rate);
-			    break;
+			if (cl->hw_gap == 0) {
+				/* rate-safe & fast */
+				t = t * max_rate + cl->tail;
+				cl->tail = do_div(t, rate);
+				break;
 			}
 			/* cl->hw_gap - destination router HZ */
 #ifdef CONFIG_NET_SCH_PSP_EST
 			cl->phaze_bytes -= cl->hw_gap;
 #endif
 			/* rounds up to destination timer quantum */
-			t=(t-cl->hw_gap)*cl->hw_gap+rate-1;
-			do_div(t,rate);
-			t=t*max_rate+cl->tail;
-			cl->tail=do_div(t,cl->hw_gap);
+			t = (t - cl->hw_gap) * cl->hw_gap + rate - 1;
+			do_div(t, rate);
+			t = t * max_rate + cl->tail;
+			cl->tail = do_div(t, cl->hw_gap);
 #endif
 			break;
 		case TC_PSP_MODE_TEST:
@@ -2813,7 +2813,9 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	*arg = (unsigned long)cl;
 	return 0;
       invalid_parameter:
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 	list_del_init(&cl->hlist);
+#endif
 	psp_deactivate(q, cl);
 	if (--cl->refcnt == 0)
 		psp_destroy_class(sch, cl);
