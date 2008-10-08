@@ -65,7 +65,7 @@
 #define FCS    (4)		/* Frame Check Sequence(4) */
 #define MIN_TARGET_RATE (1000)	/* 1 KBytes/sec */
 
-/* remove next 7 lines before kernel inclusion ;) */
+/* remove next 8 lines before kernel inclusion ;) */
 //#define CONFIG_NET_SCH_PSP_PKT_GAP
 //#define CONFIG_NET_SCH_PSP_NO_SYN_FAIRNESS
 //#define CONFIG_NET_SCH_PSP_NO_TTL
@@ -73,6 +73,7 @@
 //#define CONFIG_NET_SCH_PSP_EST
 //#define CONFIG_NET_SCH_PSP_FORCE_GAP
 //#define CONFIG_NET_SCH_PSP_FAST_SORT
+//#define CONFIG_NET_SCH_PSP_RATESAFE
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 #define PSP_HSIZE (16)
@@ -257,7 +258,7 @@ struct psp_class {
 	unsigned long max_rate;	/* maximum target rate */
 	unsigned long allocated_rate;	/* allocated rate to children */
 	u64 clock;		/* class local byte clock */
-	unsigned long tail;	/* rate division tail */
+	unsigned long tail, tail1;	/* rate division tail */
 
 	void *tcphash;		/* tcp "tracking" hash */
 #ifdef TTL
@@ -925,7 +926,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			/* reset class clock */
 			cl->state &= ~FLAG_DMARK;
 			cl->clock = q->clock;
-			cl->tail = 0;
+			cl->tail = cl->tail1 = 0;
 		}
 		if (q->phaze_idle) {
 			/* wall clock are dirty */
@@ -971,15 +972,13 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 #ifdef CONFIG_NET_SCH_PSP_EST
 		cl->phaze_bytes += t;
 #endif
+#define MUL_DIV_ROUND(res,x,y,z,tail) res=(x)*(y)+tail; tail=do_div(res,(z));
+#define MUL_DIV_ROUND_UP(res,x,y,z,tail) res=(x)*(y)+(z)-1-tail; tail=((z)-do_div(res,(z)))%(z);
 		switch (cl->state & MAJOR_MODE_MASK) {
 		case TC_PSP_MODE_ESTIMATED_DATA:
 			if (!rate)
 				goto gap0;
-			t = t * max_rate - cl->tail;
-			if ((cl->tail = do_div(t, rate))) {
-				cl->tail = rate - cl->tail;
-				t++;
-			}
+			MUL_DIV_ROUND_UP(t, t, max_rate, rate, cl->tail);
 			t0 = t;
 			break;
 		case TC_PSP_MODE_ESTIMATED:
@@ -997,29 +996,29 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			/* software/router/isp */
 			if (!rate)
 				goto gap0;
-#if 0
-			/* rate-safe + 5% gap-safe, but who needs both? */
-			t = t * max_rate - cl->tail;
-			if ((cl->tail = do_div(t, rate))) {
-				cl->tail = rate - cl->tail;
-				t++;
-			}
-#else
 			if (cl->hw_gap == 0) {
-				/* rate-safe & fast */
-				t = t * max_rate + cl->tail;
-				cl->tail = do_div(t, rate);
+#ifdef CONFIG_NET_SCH_PSP_RATESAFE
+				MUL_DIV_ROUND_UP(t, t, max_rate, rate,
+						 cl->tail);
+#else
+				MUL_DIV_ROUND(t, t, max_rate, rate, cl->tail);
+#endif
 				break;
 			}
 			/* cl->hw_gap - destination router HZ */
 #ifdef CONFIG_NET_SCH_PSP_EST
 			cl->phaze_bytes -= cl->hw_gap;
 #endif
-			/* rounds up to destination timer quantum */
+#ifdef CONFIG_NET_SCH_PSP_RATESAFE
+			MUL_DIV_ROUND_UP(t, t - cl->hw_gap, cl->hw_gap, rate,
+					 cl->tail1);
+			MUL_DIV_ROUND_UP(t, t, max_rate, cl->hw_gap, cl->tail);
+#else
+			/* rounds up to destination timer quantum, rate degradated */
 			t = (t - cl->hw_gap) * cl->hw_gap + rate - 1;
 			do_div(t, rate);
-			t = t * max_rate + cl->tail;
-			cl->tail = do_div(t, cl->hw_gap);
+			t = t * max_rate + cl->hw_gap - 1;
+			do_div(t, cl->hw_gap);
 #endif
 			break;
 		case TC_PSP_MODE_TEST:

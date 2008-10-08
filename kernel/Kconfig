@@ -79,3 +79,17 @@ config NET_SCH_PSP_FAST_SORT
 
 	 If you have very fast busy network, only PFIFO leafs and
 	 use retransmission correction modes - try Y.
+
+config NET_SCH_PSP_RATESAFE
+	bool "Enable rate-safe gap justification strategy for mode 2"
+	depends on NET_SCH_PSP
+	---help---
+	 Say Y to enable rate-safe gap justification strategy for mode 2.
+	 Say N to only rounding up while dst HZ != 0 (rate less).
+
+	 I in doubts about dynamic (strategic) rounding effects.
+	 Doubts are from "still only this mode" to "no effect".
+	 It is actual only to destination router math compensation.
+
+	 If you test both and found Y is prevent packet dropping by other-side
+	 too - use Y.
