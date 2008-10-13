@@ -264,6 +264,7 @@ struct psp_class {
 #ifdef TTL
 	struct list_head tcplist;
 #endif
+	struct __node *tree_heap;
 	struct __node *iptree;	/* ip address tree */
 #ifdef CONFIG_IPV6
 	struct __node *ip6tree;	/* ip6 address tree */
@@ -280,6 +281,7 @@ struct psp_class {
 	struct est_data back_bps;
 
 	u64 phaze_bytes;
+	u64 time;		/* to sync */
 	unsigned long ewma;
 
 	struct list_head rlist;	/* retransmission round-robin */
@@ -339,6 +341,8 @@ struct psp_sched_data {
 #ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 	struct psp_class *last, *wait;
 #endif
+	/* update_clocks() runtime */
+	u64 t;
 };
 
 /* A gap packet header (struct ethhdr + h_opcode). */
@@ -830,9 +834,12 @@ static inline unsigned long calc_rate_(struct est_data *e, clock_delta time,
 	if (time) {
 		r = ((u64) val) * hz;
 		do_div(r, time);
-		ewma = DIV_ROUND_UP(ewma, time);
-		r += e->av * (ewma - 1);
-		do_div(r, ewma);
+		if (e->av) {
+			//ewma = DIV_ROUND_UP(ewma, time);
+			ewma = 32;
+			r += e->av * (ewma - 1);
+			do_div(r, ewma);
+		}
 		e->av = r;
 	};
 	return r;
@@ -897,46 +904,88 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 				 struct psp_class *cl)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
-	clock_delta len[2] = { skb->len, SKB_BACKSIZE(skb) },
-	    hw_gap = HW_GAP(q) + FCS, t0 = skb->len + hw_gap;
-	u64 t, tt[3] = { 0, 0, 0 };
+	clock_delta len[2] = { skb->len, SKB_BACKSIZE(skb) }, hw =
+	    HW_GAP(q) + FCS, t0 = skb->len + hw;
+	u64 t;
 	unsigned long max_rate = q->max_rate, rate;
+#ifndef CONFIG_NET_SCH_PSP_RATESAFE
+	unsigned long tt[3] = { 0, 0, 0 };
 	struct psp_class *cl1 = NULL;
+#endif
 
 #ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 	q->last = cl;
 #endif
 
-#ifdef CONFIG_NET_SCH_PSP_EST
+//#ifdef CONFIG_NET_SCH_PSP_EST // need to class auto. 2solve
 	estimate_qdisc_rate(sch, q);
 	if (max_rate == 1)
 		max_rate = q->bps.av;
-#else
-	if (max_rate == 1)
-		max_rate = estimate_qdisc_rate(sch, q);
-#endif
+//#else
+//      if (max_rate == 1)
+//              max_rate = estimate_qdisc_rate(sch, q);
+//#endif
 	/* child are independent again */
 	for (; cl; cl = cl->parent) {
+#ifndef CONFIG_NET_SCH_PSP_RATESAFE
 		cl->prev = cl1;
-		cl->t = 0;
 		cl1 = cl;
+#endif
+		cl->t = 0;
 		rate = cl->rate;
-		t = len[cl->direction];
+		t = len[cl->direction] + DIV_ROUND_UP(len[cl->direction],
+						      q->mtu) * hw;
 		if ((cl->state & FLAG_DMARK)) {
 			/* reset class clock */
 			cl->state &= ~FLAG_DMARK;
 			cl->clock = q->clock;
-			cl->tail = cl->tail1 = 0;
-		}
-		if (q->phaze_idle) {
-			/* wall clock are dirty */
+#ifdef CONFIG_NET_SCH_PSP_RATESAFE
+			cl->tail1 =
+#endif
+			    cl->tail = 0;
+#if 0
 			if (rate == 1) {
-				rate = cl->bps.av;
-				reset_est(&cl->bps, q->time, 0);
+				reset_est(&cl->bps, q->clock, cl->phaze_bytes);
+				rate = 0;
 			}
+#endif
+		}
+		if (rate == 1) {
+#if 0
+			calc_rate(&cl->bps, q->clock, cl->phaze_bytes, max_rate,
+				  cl->ewma);
+#else
+			if (cl->bps.time != q->time) {
+				/* "rate auto": backlog per phaze timer */
+				/* backlog just must be sent (flushed)  */
+				u64 r =
+				    QSTATS(cl).backlog * (u64) _TIMER_HZ +
+				    cl->bps.data;
+
+				cl->bps.data =
+				    do_div(r, q->time - cl->bps.time);
+				cl->bps.time = q->time;
+#ifndef CONFIG_NET_SCH_PSP_EST
+				cl->qdisc->rate_est.bps =
+#endif
+#if 0
+				    cl->bps.av = r;
+#else
+				    /* hardcoded ewma=2. 1 was good, but not smooth */
+				    cl->bps.av = (r + cl->bps.av) >> 1;
+//                          cl->bps.av=cl->bps.av?(r+cl->bps.av)>>1:r;
+#endif
+			}
+#endif
+			rate = cl->bps.av;
+			rate = 0;
+		}
 #ifdef CONFIG_NET_SCH_PSP_EST
-			else {
-				/* calc rate by realtime & reset estimator */
+		else if (q->phaze_idle) {
+			/* wall clock are dirty */
+			/* calc rate by realtime & reset estimator */
+			if (cl->time != q->time) {
+				cl->time = q->time;
 				calc_rate_(&cl->bps, q->phaze_time,
 					   cl->phaze_bytes - cl->bps.data,
 					   _TIMER_HZ, mul_div(cl->ewma,
@@ -944,41 +993,28 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 							      max_rate));
 				reset_est(&cl->bps, q->clock, cl->phaze_bytes);
 			}
-#endif
-		} else if (rate == 1) {
-			/* estimate class rate by enqueue ("backlog must be sent") */
-			if (q->time > cl->bps.time)
-				calc_rate_(&cl->bps,
-					   q->time - cl->bps.time,
-					   QSTATS(cl).backlog, _TIMER_HZ, 0);
-			cl->bps.time = q->time;
-			cl->qdisc->rate_est.bps = rate = cl->bps.av;
-		}
-#ifdef CONFIG_NET_SCH_PSP_EST
-		else {
+		} else {
 			/* estimate real class rate */
-			if (calc_rate
-			    (&cl->bps, q->clock, cl->phaze_bytes,
-			     max_rate, cl->ewma)) {
-				/* psp_class_est(cl,cl->bps.etime); */
-			}
+			calc_rate(&cl->bps, q->clock, cl->phaze_bytes, max_rate,
+				  cl->ewma);
+			/* if () psp_class_est(cl,cl->bps.etime); */
 		}
 		cl->qdisc->rate_est.bps = cl->bps.av;
 #endif
 		/* recalculate gapsize */
 		if (!t)
 			goto gap0;
-		t += cl->hw_gap;
 #ifdef CONFIG_NET_SCH_PSP_EST
-		cl->phaze_bytes += t;
+		cl->phaze_bytes += t + cl->hw_gap;
 #endif
 #define MUL_DIV_ROUND(res,x,y,z,tail) res=(x)*(y)+tail; tail=do_div(res,(z));
 #define MUL_DIV_ROUND_UP(res,x,y,z,tail) res=(x)*(y)+(z)-1-tail; tail=((z)-do_div(res,(z)))%(z);
 		switch (cl->state & MAJOR_MODE_MASK) {
 		case TC_PSP_MODE_ESTIMATED_DATA:
 			if (!rate)
-				goto gap0;
-			MUL_DIV_ROUND_UP(t, t, max_rate, rate, cl->tail);
+				goto norm;
+			MUL_DIV_ROUND_UP(t, t + cl->hw_gap, max_rate, rate,
+					 cl->tail);
 			t0 = t;
 			break;
 		case TC_PSP_MODE_ESTIMATED:
@@ -987,15 +1023,21 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			/* hardware/ethernet */
 			if (!rate)
 				goto gap0;
-			/* gap-safe, always round up */
+#ifdef CONFIG_NET_SCH_PSP_RATESAFE
+			/* gap precision will be lost, lets save rate */
+			MUL_DIV_ROUND_UP(t, t + cl->hw_gap, max_rate, rate,
+					 cl->tail);
+#else
 			t = t * max_rate + rate - 1;
 			do_div(t, rate);
+#endif
 			cl->t = t;
 			break;
 		case TC_PSP_MODE_STATIC_RATE:
 			/* software/router/isp */
-			if (!rate)
+			if (!rate) {
 				goto gap0;
+			}
 			if (cl->hw_gap == 0) {
 #ifdef CONFIG_NET_SCH_PSP_RATESAFE
 				MUL_DIV_ROUND_UP(t, t, max_rate, rate,
@@ -1010,12 +1052,11 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			cl->phaze_bytes -= cl->hw_gap;
 #endif
 #ifdef CONFIG_NET_SCH_PSP_RATESAFE
-			MUL_DIV_ROUND_UP(t, t - cl->hw_gap, cl->hw_gap, rate,
-					 cl->tail1);
+			MUL_DIV_ROUND_UP(t, t, cl->hw_gap, rate, cl->tail1);
 			MUL_DIV_ROUND_UP(t, t, max_rate, cl->hw_gap, cl->tail);
 #else
-			/* rounds up to destination timer quantum, rate degradated */
-			t = (t - cl->hw_gap) * cl->hw_gap + rate - 1;
+			/* rounds up to destination timer quantum, rate down */
+			t = t * cl->hw_gap + rate - 1;
 			do_div(t, rate);
 			t = t * max_rate + cl->hw_gap - 1;
 			do_div(t, cl->hw_gap);
@@ -1023,13 +1064,13 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			break;
 		case TC_PSP_MODE_TEST:
 			cl->rate = cl->max_rate = cl->bps.av;
-			break;
 		default:
+		      norm:
+			t = len[0];
 			break;
 		}
-	      gap0:
 		cl->clock += t;
-
+	      gap0:
 		/* moved from psp_dequeue() */
 		if (--QSTATS(cl).qlen == 0) {
 			QSTATS(cl).backlog = 0;
@@ -1039,15 +1080,19 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			    min_t(unsigned long, len[cl->direction],
 				  QSTATS(cl).backlog);
 	}
-	q->clock0 = q->clock += t0;
+	q->clock0 = q->clock += (q->t = t0);
+#ifndef CONFIG_NET_SCH_PSP_RATESAFE
 	for (; cl1; cl1 = cl1->prev) {
 		t = cl1->t;
 		if (!t)
 			continue;
-		cl1->clock -= tt[cl1->direction];
+		/* must be: clock += tt - next_pkt_tt */
+		/* this is max */
+		cl1->clock += tt[cl1->direction];
 		tt[cl1->direction] += t;
 		tt[cl1->direction + 1] += t;
 	}
+#endif
 }
 
 /*
@@ -1085,19 +1130,74 @@ static inline clock_delta cut_gap(struct psp_sched_data *q, clock_delta gap)
 	/* -(HW_GAP+FCS) - later */
 }
 
-static inline u64 max_clock(struct psp_class *cl)
+static inline u64 max_clock(const struct psp_sched_data *q,
+			    struct psp_class *cl)
 {
-#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-	u64 res =
-	    cl->skb ? max_t(u64, psp_tstamp(cl->skb), cl->clock) : cl->clock;
-#else
+
+#ifndef CONFIG_NET_SCH_PSP_RATESAFE
 	u64 res = cl->clock;
+	struct sk_buff *skb;
+
+	if (
+#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
+		   (skb = cl->skb) ||
 #endif
+		   ((skb = cl->qdisc->q.next) && skb != (void *)&cl->qdisc->q)) {
+#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
+		res = max_t(u64, res, psp_tstamp(skb));
+#endif
+	}
 
 	while ((cl = cl->parent))
 		if (res < cl->clock)
 			res = cl->clock;
 	return res;
+#else
+	u64 res = 0;
+	struct sk_buff *skb;
+	unsigned long len[2] = { 0, 0 };
+	struct psp_class *cl1 = NULL;
+	long long t1, t2, t;
+	unsigned long rate, max_rate =
+	    q->max_rate == 1 ? q->bps.av : q->max_rate;
+
+	if (
+#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
+		   (skb = cl->skb) ||
+#endif
+		   ((skb = cl->qdisc->q.next) && skb != (void *)&cl->qdisc->q)) {
+		len[0] = skb->len + HW_GAP(q) + FCS;
+		len[1] =
+		    SKB_BACKSIZE(skb) + DIV_ROUND_UP(SKB_BACKSIZE(skb),
+						     q->mtu) * (HW_GAP(q) +
+								FCS);
+#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
+		res = psp_tstamp(skb);
+#endif
+	}
+
+	for (; cl; cl = cl->parent) {
+		cl->prev = cl1;
+		cl1 = cl;
+	}
+	t1 = q->t;
+	t2 = len[0];
+      next:
+	t = t2 - t1;
+	res = max_t(u64, res, cl1->clock - (t > cl1->clock ? 0 : t));
+	if (!(cl = cl1->prev))
+		return res;
+
+	if (cl1->t) {
+		t1 += cl1->t;
+		rate = cl->rate == 1 ? cl1->bps.av : cl1->rate;
+		if (rate)
+			t2 += mul_div(len[cl1->direction], max_rate, rate);
+	};
+
+	cl1 = cl;
+	goto next;
+#endif
 }
 
 static inline struct psp_class *lookup_early_class(const struct psp_sched_data
@@ -1111,7 +1211,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 		if (cl->clock <= q->clock && !(cl->state & FLAG_ACTIVE))
 			cl->state |= FLAG_DMARK;
 		else if (!cl->level) {
-			clock = max_clock(cl);
+			clock = max_clock(q, cl);
 			if (next == NULL || nextclock > clock ||
 			    (nextclock == clock && next->clock > cl->clock)) {
 				next = cl;
@@ -1135,8 +1235,7 @@ static struct psp_class *lookup_next_class(struct Qdisc *sch,
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl, *found = NULL;
-	clock_delta nearest = q->mtu, diff;
-	u64 clock;
+	clock_delta nearest = q->mtu;
 
 	/* pacing class */
 	found = lookup_early_class(q, &q->pacing_list, &nearest);
@@ -1145,18 +1244,9 @@ static struct psp_class *lookup_next_class(struct Qdisc *sch,
 
 	/* normal class */
 	list_for_each_entry(cl, &q->normal_list, plist) {
-		if (!(cl->state & FLAG_ACTIVE)) {
-			if (cl->clock <= q->clock)
-				cl->state |= FLAG_DMARK;
+		if (!(cl->state & FLAG_ACTIVE))
 			continue;
-		}
-		if (cl->level)
-			continue;
-		clock = cl->clock;
-		if (clock > q->clock) {
-			nearest = min_t(clock_delta, nearest, clock - q->clock);
-			continue;
-		}
+
 		list_move_tail(&cl->plist, &q->normal_list);
 		return cl;
 	}
@@ -1178,8 +1268,6 @@ static inline struct psp_class *lookup_next_class(struct Qdisc *sch,
 		if ((cl =
 		     lookup_early_class(q, &q->normal_list, &nearest)) == NULL)
 			*gapsize = cut_gap(q, nearest);
-		else
-			list_move_tail(&cl->plist, &q->normal_list);
 	}
 
 	return cl;
@@ -1321,6 +1409,39 @@ static void tree_free(node n)
 	}
 }
 
+static void tree_heap_free(struct psp_class *cl)
+{
+	struct __node *n;
+	while (cl->tree_heap) {
+		n = cl->tree_heap;
+		cl->tree_heap = n->b[0];
+		kfree(n);
+	}
+}
+
+#if 0
+static inline struct __node *tree_node_alloc(struct psp_class *cl)
+{
+	struct __node *n;
+
+	if ((n = cl->tree_heap)) {
+		cl->tree_heap = n->b[0];
+		memset(n, 0, sizeof(struct __node));
+	} else
+		n = kzalloc(sizeof(struct __node), GFP_ATOMIC);
+	return n;
+}
+
+static inline void tree_node_free(struct psp_class *cl, struct __node *n)
+{
+	n->b[0] = cl->tree_heap;
+	cl->tree_heap = n;
+}
+#else
+#define tree_node_alloc(cl) kzalloc(sizeof(struct __node), GFP_ATOMIC)
+#define tree_node_free(cl,n) kfree(n);
+#endif
+
 #if NODEVAL == 2
 /* speedup */
 #define node_val_copy(dst,src) (dst)->vv=(src)->vv
@@ -1328,7 +1449,7 @@ static void tree_free(node n)
 #define node_val_copy(dst,src) memcpy((dst)->v,(src)->v,sizeof((dst)->v))
 #endif
 
-static inline void tree_node_fix(node n)
+static inline void tree_node_fix(struct psp_class *cl, node n)
 {
 	int i;
 	struct __node *n1 = *n;
@@ -1344,7 +1465,7 @@ static inline void tree_node_fix(node n)
 		node_val_copy(n1, n1->b[1]);
 	else {
 		*n = NULL;
-		kfree(n1);
+		tree_node_free(cl, n1);
 	}
 }
 
@@ -1363,7 +1484,8 @@ static inline void tree_node_gap(struct __node *n1, u64 clock, int *gap,
 	/* *gap=max_t(int,*gap,g1-g); */
 }
 
-static inline void tree_del(node n, void *key, int size, int v0, int v1)
+static inline void tree_del(struct psp_class *cl, node n, void *key, int size,
+			    int v0, int v1)
 {
 	node nn[TREE_MAX];
 	struct __node *n1;
@@ -1376,9 +1498,9 @@ static inline void tree_del(node n, void *key, int size, int v0, int v1)
 	if ((n1 = *n)) {
 		n1->v[1] -= v1;
 		if (!(n1->v[0] -= v0))
-			tree_node_fix(n);
+			tree_node_fix(cl, n);
 		for (i--; i >= 0; i--)
-			tree_node_fix(nn[i]);
+			tree_node_fix(cl, nn[i]);
 	}
 }
 
@@ -1440,7 +1562,8 @@ static int
 #else
 static node
 #endif
-tree_add(node n, void *key1, void *key2, int size, int index, int val, int *gap)
+tree_add(struct psp_class *cl, node n, void *key1, void *key2, int size,
+	 int index, int val, int *gap)
 {
 	node nn[TREE_MAX], nx;
 	struct __node *n1;
@@ -1469,7 +1592,7 @@ tree_add(node n, void *key1, void *key2, int size, int index, int val, int *gap)
 	      node:
 		for (; i < size; i++) {
 			nn[i] = nx;
-			if (!((*nx) = n1 = kzalloc(sizeof(*n1), GFP_ATOMIC)))
+			if (!((*nx) = n1 = tree_node_alloc(cl)))
 				goto err;
 			n1->clock = clock;
 #ifdef CONFIG_NET_SCH_PSP_RRR
@@ -1477,7 +1600,7 @@ tree_add(node n, void *key1, void *key2, int size, int index, int val, int *gap)
 #endif
 			nx = &n1->b[ip_bit(i, key1)];
 		}
-		if (!((*nx) = n1 = kzalloc(sizeof(*n1), GFP_ATOMIC)))
+		if (!((*nx) = n1 = tree_node_alloc(cl)))
 			goto err;
 		n1->clock = clock;
 #ifdef CONFIG_NET_SCH_PSP_RRR
@@ -1490,7 +1613,7 @@ tree_add(node n, void *key1, void *key2, int size, int index, int val, int *gap)
 	rrr = n1->rrr += index;
 #endif
 	for (j = i - 1; j >= 0; j--) {
-		tree_node_fix(nn[j]);
+		tree_node_fix(cl, nn[j]);
 		tree_node_gap(*nn[j], clock, gap, val);
 #ifdef CONFIG_NET_SCH_PSP_RRR
 		(*nn[j])->rrr = rrr;
@@ -1499,10 +1622,11 @@ tree_add(node n, void *key1, void *key2, int size, int index, int val, int *gap)
 #ifdef CONFIG_NET_SCH_PSP_RRR
 	if (key2)
 		rrr =
-		    (rrr + tree_add(n, key2, NULL, size, index, val, gap)) >> 1;
+		    (rrr +
+		     tree_add(cl, n, key2, NULL, size, index, val, gap)) >> 1;
 #else
 	if (key2)
-		tree_add(n, key2, NULL, size, index, val, gap);
+		tree_add(cl, n, key2, NULL, size, index, val, gap);
 #endif
 	for (j = 0; j < i; j++)
 		(*nn[j])->clock = clock;
@@ -1672,9 +1796,9 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	}
 	/* change hashed connection to new */
 	if (cl->state & TC_PSP_MODE_RETRANS_DST)
-		tree_del(iptree, &h->daddr, asz << 3, h->v[0], h->v[1]);
+		tree_del(cl, iptree, &h->daddr, asz << 3, h->v[0], h->v[1]);
 	if (cl->state & TC_PSP_MODE_RETRANS_SRC)
-		tree_del(iptree, &h->saddr, asz << 3, h->v[0], h->v[1]);
+		tree_del(cl, iptree, &h->saddr, asz << 3, h->v[0], h->v[1]);
 #if 0
 	memset(h, 0, sizeof(struct hashitem));
 #else
@@ -1693,7 +1817,6 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	if (TH->ack) {
 	      next_aseq:
 		if (aseq > h->ack_seq
-//                  && ((TH->fin | TH->rst | TH->psh | TH->syn) == 0)
 		    && ((TH->fin | TH->rst) == 0)
 		    && (x = q->mtu - hdr_size)) {
 			SKB_BACKSIZE(skb) = be16_to_cpu(TH->window);
@@ -1704,7 +1827,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	}
       next_pkt:
 	memcpy(&h->misc, th + 12, sizeof(h->misc));
-	/* h->end+=(TH->syn?1:(skb->len-hdr_size))+TH->fin; *//* rfc793 */
+	/* h->end+=(TH->syn?1:(skb->len-hdr_size))+TH->fin; */ /* rfc793 */
 	h->end += skb->len - hdr_size + TH->syn + TH->fin;
       continue_connection:
 #ifdef TTL
@@ -1715,7 +1838,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #ifdef CONFIG_NET_SCH_PSP_RRR
 		rrr =
 #endif
-		    tree_add(iptree, addr[0], addr[1], asz << 3, res, len,
+		    tree_add(cl, iptree, addr[0], addr[1], asz << 3, res, len,
 			     &gap);
 #ifdef CONFIG_NET_SCH_PSP_RRR
 	if (res)
@@ -1740,9 +1863,11 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		asz = h->asize;
 #endif
 		if (cl->state & TC_PSP_MODE_RETRANS_DST)
-			tree_del(iptree, &h->daddr, asz << 3, h->v[0], h->v[1]);
+			tree_del(cl, iptree, &h->daddr, asz << 3, h->v[0],
+				 h->v[1]);
 		if (cl->state & TC_PSP_MODE_RETRANS_SRC)
-			tree_del(iptree, &h->saddr, asz << 3, h->v[0], h->v[1]);
+			tree_del(cl, iptree, &h->saddr, asz << 3, h->v[0],
+				 h->v[1]);
 		__list_del(h->tcplist.prev, h->tcplist.next);
 #if 0
 		memset(h, 0, sizeof(struct hashitem));
@@ -2466,6 +2591,7 @@ static void psp_destroy_class(struct Qdisc *sch, struct psp_class *cl)
 #ifdef CONFIG_IPV6
 	tree_free(&cl->ip6tree);
 #endif
+	tree_heap_free(cl);
 	kfree(cl);
 }
 
@@ -2806,6 +2932,7 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 #ifdef CONFIG_IPV6
 		tree_free(&cl->ip6tree);
 #endif
+		tree_heap_free(cl);
 	}
 	bind_default(sch);
 	sch_tree_unlock(sch);
