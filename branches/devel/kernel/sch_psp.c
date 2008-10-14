@@ -241,6 +241,7 @@ struct psp_class {
 	struct tcf_proto *filter_list;	/* filter list */
 	int filter_cnt;		/* filter count */
 	u32 hw_gap;		/* inter frame gap + preamble + FCS */
+	u32 hz;			/* destination device timer frequence */
 
 	struct list_head dlist;	/* drop list */
 	struct list_head plist;	/* normal/pacing class qdisc list */
@@ -288,7 +289,7 @@ struct psp_class {
 	int weight, weight_sum;
 
 	/* update_clocks() runtime */
-	u64 t;
+	clock_delta t;
 	struct psp_class *prev;
 };
 
@@ -342,7 +343,7 @@ struct psp_sched_data {
 	struct psp_class *last, *wait;
 #endif
 	/* update_clocks() runtime */
-	u64 t;
+	clock_delta t;
 };
 
 /* A gap packet header (struct ethhdr + h_opcode). */
@@ -835,8 +836,8 @@ static inline unsigned long calc_rate_(struct est_data *e, clock_delta time,
 		r = ((u64) val) * hz;
 		do_div(r, time);
 		if (e->av) {
-			//ewma = DIV_ROUND_UP(ewma, time);
-			ewma = 32;
+			ewma = DIV_ROUND_UP(ewma, time);
+			//ewma = 32;
 			r += e->av * (ewma - 1);
 			do_div(r, ewma);
 		}
@@ -905,11 +906,12 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
 	clock_delta len[2] = { skb->len, SKB_BACKSIZE(skb) }, hw =
-	    HW_GAP(q) + FCS, t0 = skb->len + hw;
+	    HW_GAP(q) + FCS, t0 = skb->len + hw, npkt[2] = {
+	1, DIV_ROUND_UP(SKB_BACKSIZE(skb), q->mtu)};
 	u64 t;
 	unsigned long max_rate = q->max_rate, rate;
 #ifndef CONFIG_NET_SCH_PSP_RATESAFE
-	unsigned long tt[3] = { 0, 0, 0 };
+	clock_delta tt[3];
 	struct psp_class *cl1 = NULL;
 #endif
 
@@ -917,14 +919,15 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	q->last = cl;
 #endif
 
-//#ifdef CONFIG_NET_SCH_PSP_EST // need to class auto. 2solve
+#ifdef CONFIG_NET_SCH_PSP_EST
+	/* need to class auto. 2solve */
 	estimate_qdisc_rate(sch, q);
 	if (max_rate == 1)
 		max_rate = q->bps.av;
-//#else
-//      if (max_rate == 1)
-//              max_rate = estimate_qdisc_rate(sch, q);
-//#endif
+#else
+	if (max_rate == 1)
+		max_rate = estimate_qdisc_rate(sch, q);
+#endif
 	/* child are independent again */
 	for (; cl; cl = cl->parent) {
 #ifndef CONFIG_NET_SCH_PSP_RATESAFE
@@ -933,8 +936,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 #endif
 		cl->t = 0;
 		rate = cl->rate;
-		t = len[cl->direction] + DIV_ROUND_UP(len[cl->direction],
-						      q->mtu) * hw;
+		t = len[cl->direction] + npkt[cl->direction] * cl->hw_gap;
 		if ((cl->state & FLAG_DMARK)) {
 			/* reset class clock */
 			cl->state &= ~FLAG_DMARK;
@@ -973,7 +975,6 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 #else
 				    /* hardcoded ewma=2. 1 was good, but not smooth */
 				    cl->bps.av = (r + cl->bps.av) >> 1;
-//                          cl->bps.av=cl->bps.av?(r+cl->bps.av)>>1:r;
 #endif
 			}
 #endif
@@ -1005,7 +1006,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		if (!t)
 			goto gap0;
 #ifdef CONFIG_NET_SCH_PSP_EST
-		cl->phaze_bytes += t + cl->hw_gap;
+		cl->phaze_bytes += t;
 #endif
 #define MUL_DIV_ROUND(res,x,y,z,tail) res=(x)*(y)+tail; tail=do_div(res,(z));
 #define MUL_DIV_ROUND_UP(res,x,y,z,tail) res=(x)*(y)+(z)-1-tail; tail=((z)-do_div(res,(z)))%(z);
@@ -1013,8 +1014,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		case TC_PSP_MODE_ESTIMATED_DATA:
 			if (!rate)
 				goto norm;
-			MUL_DIV_ROUND_UP(t, t + cl->hw_gap, max_rate, rate,
-					 cl->tail);
+			MUL_DIV_ROUND_UP(t, t, max_rate, rate, cl->tail);
 			t0 = t;
 			break;
 		case TC_PSP_MODE_ESTIMATED:
@@ -1023,14 +1023,8 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			/* hardware/ethernet */
 			if (!rate)
 				goto gap0;
-#ifdef CONFIG_NET_SCH_PSP_RATESAFE
-			/* gap precision will be lost, lets save rate */
-			MUL_DIV_ROUND_UP(t, t + cl->hw_gap, max_rate, rate,
-					 cl->tail);
-#else
 			t = t * max_rate + rate - 1;
 			do_div(t, rate);
-#endif
 			cl->t = t;
 			break;
 		case TC_PSP_MODE_STATIC_RATE:
@@ -1038,7 +1032,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			if (!rate) {
 				goto gap0;
 			}
-			if (cl->hw_gap == 0) {
+			if (cl->hz == 0) {
 #ifdef CONFIG_NET_SCH_PSP_RATESAFE
 				MUL_DIV_ROUND_UP(t, t, max_rate, rate,
 						 cl->tail);
@@ -1047,27 +1041,26 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 #endif
 				break;
 			}
-			/* cl->hw_gap - destination router HZ */
-#ifdef CONFIG_NET_SCH_PSP_EST
-			cl->phaze_bytes -= cl->hw_gap;
-#endif
 #ifdef CONFIG_NET_SCH_PSP_RATESAFE
-			MUL_DIV_ROUND_UP(t, t, cl->hw_gap, rate, cl->tail1);
-			MUL_DIV_ROUND_UP(t, t, max_rate, cl->hw_gap, cl->tail);
+			MUL_DIV_ROUND_UP(t, t, cl->hz, rate, cl->tail1);
+			MUL_DIV_ROUND_UP(t, t, max_rate, cl->hz, cl->tail);
 #else
 			/* rounds up to destination timer quantum, rate down */
-			t = t * cl->hw_gap + rate - 1;
+			t = t * cl->hz + rate - 1;
 			do_div(t, rate);
-			t = t * max_rate + cl->hw_gap - 1;
-			do_div(t, cl->hw_gap);
+			t = t * max_rate + cl->hz - 1;
+			do_div(t, cl->hz);
 #endif
 			break;
 		case TC_PSP_MODE_TEST:
 			cl->rate = cl->max_rate = cl->bps.av;
 		default:
 		      norm:
-			t = len[0];
+#ifdef CONFIG_NET_SCH_PSP_RATESAFE
 			break;
+#else
+			goto gap0;
+#endif
 		}
 		cl->clock += t;
 	      gap0:
@@ -1082,12 +1075,13 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	}
 	q->clock0 = q->clock += (q->t = t0);
 #ifndef CONFIG_NET_SCH_PSP_RATESAFE
+	tt[0] = tt[1] = tt[2] = t0 - HW_GAP(q) - FCS - 34;
 	for (; cl1; cl1 = cl1->prev) {
 		t = cl1->t;
 		if (!t)
 			continue;
 		/* must be: clock += tt - next_pkt_tt */
-		/* this is max */
+		/* this is max: clock += tt - min_tt  */
 		cl1->clock += tt[cl1->direction];
 		tt[cl1->direction] += t;
 		tt[cl1->direction + 1] += t;
@@ -1138,26 +1132,22 @@ static inline u64 max_clock(const struct psp_sched_data *q,
 	u64 res = cl->clock;
 	struct sk_buff *skb;
 
-	if (
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-		   (skb = cl->skb) ||
-#endif
-		   ((skb = cl->qdisc->q.next) && skb != (void *)&cl->qdisc->q)) {
-#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
+	if ((skb = cl->skb) ||
+	    ((skb = cl->qdisc->q.next) && skb != (void *)&cl->qdisc->q))
 		res = max_t(u64, res, psp_tstamp(skb));
 #endif
-	}
 
 	while ((cl = cl->parent))
 		if (res < cl->clock)
 			res = cl->clock;
-	return res;
 #else
 	u64 res = 0;
 	struct sk_buff *skb;
-	unsigned long len[2] = { 0, 0 };
+	unsigned long len[2] = { 0, 0 }, npkt[2] = {
+	0, 0};
 	struct psp_class *cl1 = NULL;
-	long long t1, t2, t;
+	long long t1[3], t2[3], t;
 	unsigned long rate, max_rate =
 	    q->max_rate == 1 ? q->bps.av : q->max_rate;
 
@@ -1166,11 +1156,11 @@ static inline u64 max_clock(const struct psp_sched_data *q,
 		   (skb = cl->skb) ||
 #endif
 		   ((skb = cl->qdisc->q.next) && skb != (void *)&cl->qdisc->q)) {
-		len[0] = skb->len + HW_GAP(q) + FCS;
-		len[1] =
-		    SKB_BACKSIZE(skb) + DIV_ROUND_UP(SKB_BACKSIZE(skb),
-						     q->mtu) * (HW_GAP(q) +
-								FCS);
+		npkt[0] = 1;
+		len[0] = skb->len;
+		len[1] = SKB_BACKSIZE(skb);
+		npkt[1] = DIV_ROUND_UP(len[1], q->mtu);
+
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
 		res = psp_tstamp(skb);
 #endif
@@ -1180,24 +1170,31 @@ static inline u64 max_clock(const struct psp_sched_data *q,
 		cl->prev = cl1;
 		cl1 = cl;
 	}
-	t1 = q->t;
-	t2 = len[0];
+	t1[0] = t1[1] = t1[2] = q->t;
+	t2[0] = t2[1] = t2[2] = len[0] + HW_GAP(q) + FCS;
       next:
-	t = t2 - t1;
+	t = t2[cl1->direction] - t1[cl1->direction];
 	res = max_t(u64, res, cl1->clock - (t > cl1->clock ? 0 : t));
-	if (!(cl = cl1->prev))
-		return res;
+	if ((cl = cl1->prev)) {
 
-	if (cl1->t) {
-		t1 += cl1->t;
-		rate = cl->rate == 1 ? cl1->bps.av : cl1->rate;
-		if (rate)
-			t2 += mul_div(len[cl1->direction], max_rate, rate);
-	};
+		if (cl1->t) {
+			t1[cl1->direction] += cl1->t;
+			t1[cl1->direction + 1] += cl1->t;
+			rate = cl->rate == 1 ? cl1->bps.av : cl1->rate;
+			if (rate) {
+				t = mul_div(len[cl1->direction] +
+					    npkt[cl1->direction] * cl1->hw_gap,
+					    max_rate, rate);
+				t2[cl1->direction] += t;
+				t2[cl1->direction + 1] += t;
+			}
+		};
 
-	cl1 = cl;
-	goto next;
+		cl1 = cl;
+		goto next;
+	}
 #endif
+	return res;
 }
 
 static inline struct psp_class *lookup_early_class(const struct psp_sched_data
@@ -1816,8 +1813,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	h->end = h->seq = seq;
 	if (TH->ack) {
 	      next_aseq:
-		if (aseq > h->ack_seq
-		    && ((TH->fin | TH->rst) == 0)
+		if (aseq > h->ack_seq && ((TH->fin | TH->rst) == 0)
 		    && (x = q->mtu - hdr_size)) {
 			SKB_BACKSIZE(skb) = be16_to_cpu(TH->window);
 			SKB_BACKSIZE(skb) +=
@@ -1827,7 +1823,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	}
       next_pkt:
 	memcpy(&h->misc, th + 12, sizeof(h->misc));
-	/* h->end+=(TH->syn?1:(skb->len-hdr_size))+TH->fin; */ /* rfc793 */
+	/* h->end+=(TH->syn?1:(skb->len-hdr_size))+TH->fin; *//* rfc793 */
 	h->end += skb->len - hdr_size + TH->syn + TH->fin;
       continue_connection:
 #ifdef TTL
@@ -2905,6 +2901,8 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 		est_add(cl);
 		break;
 	case TC_PSP_MODE_STATIC_RATE:
+		cl->hz = cl->hw_gap;
+		cl->hw_gap = 0;
 	case TC_PSP_MODE_STATIC:
 		cl->rate = cl->max_rate;
 		/* let it be oversubscribed! */
