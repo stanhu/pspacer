@@ -1077,14 +1077,11 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 #ifndef CONFIG_NET_SCH_PSP_RATESAFE
 	tt[0] = tt[1] = tt[2] = t0 - HW_GAP(q) - FCS - 34;
 	for (; cl1; cl1 = cl1->prev) {
-		t = cl1->t;
-		if (!t)
-			continue;
 		/* must be: clock += tt - next_pkt_tt */
 		/* this is max: clock += tt - min_tt  */
 		cl1->clock += tt[cl1->direction];
-		tt[cl1->direction] += t;
-		tt[cl1->direction + 1] += t;
+		tt[cl1->direction] += cl1->t;
+		tt[cl1->direction + 1] += cl1->t;
 	}
 #endif
 }
