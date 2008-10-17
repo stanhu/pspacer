@@ -1129,7 +1129,7 @@ static inline u64 max_clock(const struct psp_sched_data *q,
 	tt[0] = tt[1] = tt[2] = len[0] + HW_GAP(q) + FCS - q->t;
       next:
 	t = tt[cl1->direction];
-	res = max_t(u64, res, cl1->clock - (t > cl1->clock ? 0 : t));
+	res = max_t(u64, res, t > 0 && t > cl1->clock ? 0 : (cl1->clock - t));
 	if ((cl = cl1->prev)) {	/* in 1-level perfomance are near old */
 		if (cl1->t) {
 			t = cl1->rate ? mul_div(len[cl1->direction] +
@@ -2027,10 +2027,8 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 	struct sk_buff *skb1 = NULL;
 #endif
 
-#ifdef CONFIG_NET_SCH_PSP_EST
 	if (q->clock0 == q->clock)
 		q->phaze_idle = !sch->q.qlen;
-#endif
 
 	cl = psp_classify(skb, sch, &err);
 #ifdef ENABLE_PSP_DIRECT
