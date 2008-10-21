@@ -1107,11 +1107,13 @@ static inline u64 max_clock(const struct psp_sched_data *q,
 	struct psp_class *cl1 = NULL;
 	long tt[3], t;
 
-	if (
-#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-		   (skb = cl->skb) ||
-#endif
-		   ((skb = cl->qdisc->q.next) && skb != (void *)&cl->qdisc->q)) {
+		/* packet alredy prefetched... */
+	if ((skb = cl->skb) ||
+		    /* or pfifo simple lookup success... */
+		   ((skb = cl->qdisc->q.next) && skb != (void *)&cl->qdisc->q) ||
+		    /* or prefetch packet from unknown leaf */
+		   (cl->qdisc->q.qlen && (skb = cl->skb = cl->qdisc->ops->dequeue(cl->qdisc)))
+		    ) {
 		npkt[0] = 1;
 		len[0] = skb->len;
 		len[1] = SKB_BACKSIZE(skb);
@@ -2216,18 +2218,15 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 #endif
 		cl = lookup_next_class(sch, &gapsize);
 	if (cl != NULL) {
-#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-		/* prefetch single packet with individual gap */
+#ifndef CONFIG_NET_SCH_PSP_PKT_GAP
+#ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
+		if (q->last)
+			goto min_gap;
+#endif
+#endif
 		skb = cl->skb;
 		cl->skb = NULL;
 		if (skb == NULL) {
-#endif
-#ifndef CONFIG_NET_SCH_PSP_PKT_GAP
-#ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
-			if (q->last)
-				goto min_gap;
-#endif
-#endif
 			skb = cl->qdisc->ops->dequeue(cl->qdisc);
 			hints_delete(skb);
 
@@ -2242,8 +2241,8 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 			if (q->last)
 				goto min_gap;
 #endif
-		}
 #endif
+		}
 		sch->q.qlen--;
 		update_clocks(skb, sch, cl);
 		return skb;
