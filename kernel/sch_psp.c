@@ -1160,8 +1160,9 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 				continue;
 			}
 		}
-		if (cl->level == 0 && next == NULL || nextdiff > d
-		    || (nextdiff == d && nextcdiff > cdiff)) {
+		if (cl->level == 0 && (next == NULL || nextdiff > d
+				       || (nextdiff == d
+					   && nextcdiff > cdiff))) {
 			next = cl;
 			nextdiff = d;
 			nextcdiff = cdiff;
