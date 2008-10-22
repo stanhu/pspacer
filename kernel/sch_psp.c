@@ -1118,7 +1118,7 @@ static inline s64 max_diff(const struct psp_sched_data *q,
 		len[0] = skb->len;
 		len[1] = SKB_BACKSIZE(skb);
 		npkt[1] = DIV_ROUND_UP(len[1], q->mtu);
-		diff -= len[0];
+		*cdiff = diff -= len[0];
 		t -= len[0];
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
 		diff = max_t(s64, diff, (s64) (psp_tstamp(skb) - q->clock));
