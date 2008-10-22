@@ -66,12 +66,12 @@
 #define MIN_TARGET_RATE (1000)	/* 1 KBytes/sec */
 
 /* remove next 8 lines before kernel inclusion ;) */
-//#define CONFIG_NET_SCH_PSP_PKT_GAP
+#define CONFIG_NET_SCH_PSP_PKT_GAP
 //#define CONFIG_NET_SCH_PSP_NO_SYN_FAIRNESS
 //#define CONFIG_NET_SCH_PSP_NO_TTL
 //#define CONFIG_NET_SCH_PSP_RRR
 //#define CONFIG_NET_SCH_PSP_EST
-//#define CONFIG_NET_SCH_PSP_FORCE_GAP
+#define CONFIG_NET_SCH_PSP_FORCE_GAP
 //#define CONFIG_NET_SCH_PSP_FAST_SORT
 //#define CONFIG_NET_SCH_PSP_RATESAFE
 
@@ -928,19 +928,15 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	    HW_GAP(q) + FCS, t0 = skb->len + hw, npkt[2] = {
 	1, DIV_ROUND_UP(SKB_BACKSIZE(skb), q->mtu)};
 	u64 t;
-#ifdef CONFIG_NET_SCH_PSP_RATESAFE
 	struct psp_class *cl1 = NULL;
-#endif
 
 #ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 	q->last = cl;
 #endif
 
 	for (; cl; cl = cl->parent) {
-#ifdef CONFIG_NET_SCH_PSP_RATESAFE
 		cl->prev = cl1;
 		cl1 = cl;
-#endif
 		t = len[cl->direction] + npkt[cl->direction] * cl->hw_gap;
 		if ((cl->state & FLAG_DMARK)) {
 			/* reset class clock */
@@ -1031,13 +1027,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		case TC_PSP_MODE_TEST:
 			cl->rate = cl->max_rate = cl->bps.av;
 		default:
-#ifdef CONFIG_NET_SCH_PSP_RATESAFE
 			goto gap0;
-#else
-			/* faster */
-			t += hw;
-			break;
-#endif
 		}
 		cl->clock += t;
 	      gap0:
@@ -1050,15 +1040,14 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			    min_t(unsigned long, len[cl->direction],
 				  QSTATS(cl).backlog);
 	}
-	q->clock0 = q->clock += (q->t = t0);
-#ifdef CONFIG_NET_SCH_PSP_RATESAFE
+	t = q->clock0 = q->clock += (q->t = t0);
+	/* normal class clock just equal parent's clock */
 	for (; cl1; cl1 = cl1->prev) {
 		if ((cl1->state & MAJOR_MODE_MASK) == TC_PSP_MODE_NORMAL)
-			cl1->clock += t0;
+			cl1->clock = t;
 		else
-			t0 = cl1->t ? : t0;
+			t = cl1->clock;
 	}
-#endif
 }
 
 /*
@@ -1096,56 +1085,61 @@ static inline clock_delta cut_gap(struct psp_sched_data *q, clock_delta gap)
 	/* -(HW_GAP+FCS) - later */
 }
 
-static inline u64 max_clock(const struct psp_sched_data *q,
-			    struct psp_class *cl)
+/* real class clock are += tt - next_tt
+ * where: tt - last packet total parent's ethernet transfer time,
+ *        next_tt - next packet total parent's transfer time.
+ * Summary there are zero on timeline, but actual for packet send time.
+ */
+
+/* return max clock diff for hierarchy and this class corrected diff */
+static inline s64 max_diff(const struct psp_sched_data *q,
+			   struct psp_class *cl, s64 * cdiff)
 {
-
-	u64 res = 0;
 	struct sk_buff *skb;
-	unsigned long len[2] = { 0, 0 }, npkt[2] = {
-	0, 0};
-	struct psp_class *cl1 = NULL;
-	long tt[3], t;
+	s64 diff, tt[3], t = (s64) q->t - (HW_GAP(q) + FCS);
+	unsigned long len[2] = { 0, 0 };
+	unsigned int npkt[2] = { 0, 0 };
+	struct psp_class *cl1 = NULL, *cl2 = cl;
 
-		/* packet alredy prefetched... */
+	for (; cl2; cl2 = cl2->parent) {
+		cl2->prev = cl1;
+		cl1 = cl2;
+	}
+	*cdiff = diff = (s64) (cl1->clock - q->clock) + t;
+	/* packet alredy prefetched... */
 	if ((skb = cl->skb) ||
-		    /* or pfifo simple lookup success... */
-		   ((skb = cl->qdisc->q.next) && skb != (void *)&cl->qdisc->q) ||
-		    /* or prefetch packet from unknown leaf */
-		   (cl->qdisc->q.qlen && (skb = cl->skb = cl->qdisc->ops->dequeue(cl->qdisc)))
-		    ) {
+	    /* or pfifo simple lookup success... */
+	    ((skb = cl->qdisc->q.next) && skb != (void *)&cl->qdisc->q) ||
+	    /* or prefetch packet from unknown leaf */
+	    (cl->qdisc->q.qlen
+	     && (skb = cl->skb = cl->qdisc->ops->dequeue(cl->qdisc)))
+	    ) {
 		npkt[0] = 1;
 		len[0] = skb->len;
 		len[1] = SKB_BACKSIZE(skb);
 		npkt[1] = DIV_ROUND_UP(len[1], q->mtu);
-
+		diff -= len[0];
+		t -= len[0];
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-		res = psp_tstamp(skb);
+		diff = max_t(s64, diff, (s64) (psp_tstamp(skb) - q->clock));
 #endif
 	}
-
-	for (; cl; cl = cl->parent) {
-		cl->prev = cl1;
-		cl1 = cl;
-	}
-	tt[0] = tt[1] = tt[2] = len[0] + HW_GAP(q) + FCS - q->t;
-      next:
-	t = tt[cl1->direction];
-	res = max_t(u64, res, t > 0 && t > cl1->clock ? 0 : (cl1->clock - t));
-	if ((cl = cl1->prev)) {	/* in 1-level perfomance are near old */
-		if (cl1->t) {
-			t = cl1->rate ? mul_div(len[cl1->direction] +
-						npkt[cl1->direction] *
-						cl1->hw_gap, q->max_rate,
-						cl1->rate) : 0;
-			t -= cl1->t;
+	tt[0] = tt[1] = tt[2] = t;
+	while ((cl2 = cl1->prev)) {
+		if ((t = cl1->t)) {
+			t -= cl1->rate ? mul_div(len[cl1->direction] +
+						 npkt[cl1->direction] *
+						 cl1->hw_gap, q->max_rate,
+						 cl1->rate) : 0;
 			tt[cl1->direction] += t;
 			tt[cl1->direction + 1] += t;
 		}
-		cl1 = cl;
-		goto next;
+		diff = max_t(s64, diff, *cdiff =
+			     (s64) (cl2->clock - q->clock) +
+			     tt[cl2->direction]);
+		cl1 = cl2;
 	}
-	return res;
+	return diff;
 }
 
 static inline struct psp_class *lookup_early_class(const struct psp_sched_data
@@ -1153,23 +1147,29 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 						   clock_delta * diff)
 {
 	struct psp_class *cl, *next = NULL;
-	u64 clock, nextclock;
+	s64 d, nextdiff, cdiff, nextcdiff;
 
+	/* signed diff still correct around clock overflow... */
 	list_for_each_entry(cl, list, plist) {
-		if (cl->clock <= q->clock && !(cl->state & FLAG_ACTIVE))
-			cl->state |= FLAG_DMARK;
-		else if (!cl->level) {
-			clock = max_clock(q, cl);
-			if (next == NULL || nextclock > clock ||
-			    (nextclock == clock && next->clock > cl->clock)) {
-				next = cl;
-				nextclock = clock;
+		d = max_diff(q, cl, &cdiff);	/* you may optimize */
+		if (!(cl->state & FLAG_ACTIVE)) {
+			if (cl->state & FLAG_DMARK)	/* ...but not too far */
+				continue;
+			if (cdiff <= 0) {
+				cl->state |= FLAG_DMARK;
+				continue;
 			}
 		}
+		if (cl->level == 0 && next == NULL || nextdiff > d
+		    || (nextdiff == d && nextcdiff > cdiff)) {
+			next = cl;
+			nextdiff = d;
+			nextcdiff = cdiff;
+		}
 	}
-	if (next && nextclock > q->clock) {
-		*diff = min_t(clock_delta, *diff, nextclock - q->clock);
+	if (next && nextdiff > 0) {
 		next = NULL;
+		*diff = min_t(s64, *diff, nextdiff);
 	}
 	return next;
 }
@@ -1367,7 +1367,7 @@ static void tree_heap_free(struct psp_class *cl)
 	}
 }
 
-#if 0
+#if 1
 static inline struct __node *tree_node_alloc(struct psp_class *cl)
 {
 	struct __node *n;
@@ -1376,7 +1376,7 @@ static inline struct __node *tree_node_alloc(struct psp_class *cl)
 		cl->tree_heap = n->b[0];
 		memset(n, 0, sizeof(struct __node));
 	} else
-		n = kzalloc(sizeof(struct __node), GFP_ATOMIC);
+		n = kzalloc(sizeof(struct __node), GFP_KERNEL);
 	return n;
 }
 
@@ -1799,8 +1799,9 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #else
 	h->clock = skb->len + (psp_tstamp(skb) = h->clock + gap);
 #endif
-	if (early)
-		psp_tstamp(skb) = (psp_tstamp(skb) + early) >> 1;
+	early += psp_tstamp(skb);
+	if (early > psp_tstamp(skb))	/* overflow protection */
+		psp_tstamp(skb) = early >> 1;
 #ifdef TTL
 	if ((!list_empty(&cl->tcplist))
 	    && cl->clock > (h =
@@ -2209,7 +2210,6 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 		sch->q.qlen--;
 		return skb;
 	}
-      lookup:
 	/* normal/pacing class */
 #ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 	if ((cl = q->wait))
@@ -2218,30 +2218,17 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 #endif
 		cl = lookup_next_class(sch, &gapsize);
 	if (cl != NULL) {
-#ifndef CONFIG_NET_SCH_PSP_PKT_GAP
 #ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 		if (q->last)
 			goto min_gap;
-#endif
 #endif
 		skb = cl->skb;
 		cl->skb = NULL;
 		if (skb == NULL) {
 			skb = cl->qdisc->ops->dequeue(cl->qdisc);
-			hints_delete(skb);
-
 			if (skb == NULL)
-				return NULL;	/* nothing to send */
-#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-			if (psp_tstamp(skb) > q->clock) {
-				cl->skb = skb;
-				goto lookup;
-			}
-#ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
-			if (q->last)
-				goto min_gap;
-#endif
-#endif
+				goto nothing;	/* nothing to send */
+			hints_delete(skb);
 		}
 		sch->q.qlen--;
 		update_clocks(skb, sch, cl);
@@ -2267,10 +2254,7 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 	return skb;
 #ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
       min_gap:
-	/* remember class/packet and insert minimal gap before */
-#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-	cl->skb = skb;
-#endif
+	/* remember class and insert minimal gap before */
 	q->wait = cl;
 	gapsize = sizeof(struct gaphdr);
 	goto gap;
@@ -2278,6 +2262,7 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 #endif
       noclone:
 	printk(KERN_ERR "psp: cannot clone a gap packet.\n");
+      nothing:
 	return NULL;
 }
 
