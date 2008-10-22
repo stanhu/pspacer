@@ -66,12 +66,12 @@
 #define MIN_TARGET_RATE (1000)	/* 1 KBytes/sec */
 
 /* remove next 8 lines before kernel inclusion ;) */
-#define CONFIG_NET_SCH_PSP_PKT_GAP
+//#define CONFIG_NET_SCH_PSP_PKT_GAP
 //#define CONFIG_NET_SCH_PSP_NO_SYN_FAIRNESS
 //#define CONFIG_NET_SCH_PSP_NO_TTL
 //#define CONFIG_NET_SCH_PSP_RRR
 //#define CONFIG_NET_SCH_PSP_EST
-#define CONFIG_NET_SCH_PSP_FORCE_GAP
+//#define CONFIG_NET_SCH_PSP_FORCE_GAP
 //#define CONFIG_NET_SCH_PSP_FAST_SORT
 //#define CONFIG_NET_SCH_PSP_RATESAFE
 
