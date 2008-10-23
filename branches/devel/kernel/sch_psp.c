@@ -977,12 +977,12 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 #ifdef CONFIG_NET_SCH_PSP_EST
 		cl->phaze_bytes += t;
 #endif
+		if (!cl->rate)
+			goto gap0;
 #define MUL_DIV_ROUND(res,x,y,z,tail) res=(x)*(y)+tail; tail=do_div(res,(z));
 #define MUL_DIV_ROUND_UP(res,x,y,z,tail) res=(x)*(y)+(z)-1-tail; tail=((z)-do_div(res,(z)))%(z);
 		switch (cl->state & MAJOR_MODE_MASK) {
 		case TC_PSP_MODE_ESTIMATED_DATA:
-			if (!cl->rate)
-				goto gap0;
 			MUL_DIV_ROUND_UP(t, t, q->max_rate, cl->rate, cl->tail);
 			t0 = t;
 			break;
@@ -990,17 +990,12 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		case TC_PSP_MODE_ESTIMATED_GAP:
 		case TC_PSP_MODE_STATIC:
 			/* hardware/ethernet */
-			if (!cl->rate)
-				goto gap0;
 			t = t * q->max_rate + cl->rate - 1;
 			do_div(t, cl->rate);
 			cl->t = t;
 			break;
 		case TC_PSP_MODE_STATIC_RATE:
 			/* software/router/isp */
-			if (!cl->rate) {
-				goto gap0;
-			}
 			if (cl->hz == 0) {
 #ifdef CONFIG_NET_SCH_PSP_RATESAFE
 				MUL_DIV_ROUND_UP(t, t, q->max_rate, cl->rate,
@@ -1025,7 +1020,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		case TC_PSP_MODE_TEST:
 			cl->rate = cl->max_rate = cl->bps.av;
 		default:
-			goto gap0;
+			break;
 		}
 		cl->clock += t;
 	      gap0:
@@ -1043,13 +1038,12 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	tt[0] = tt[1] = tt[2] = t0 - hw;
 	/* normal class clock just equal parent's clock */
 	for (; cl1; cl1 = cl1->prev) {
-		if ((cl1->state & MAJOR_MODE_MASK) == TC_PSP_MODE_NORMAL)
-			cl1->clock = t + (cl1->tt = tt[cl1->direction]);
-		else {
+		if (cl1->rate) {
 			t = cl1->clock += cl1->tt = tt[cl1->direction];
 			tt[cl1->direction] += cl1->t;
 			tt[cl1->direction + 1] += cl1->t;
-		}
+		} else
+			cl1->clock = t;
 	}
 }
 
@@ -1101,7 +1095,7 @@ static inline s64 max_diff(const struct psp_sched_data *q,
 {
 	s64 diff;
 	struct sk_buff *skb;
-	clock_delta tt[3], t;
+	clock_delta tt[3], tt0[2], t;
 	unsigned long len[2];
 	unsigned int npkt[2];
 	struct psp_class *cl2, *cl1 = NULL;
@@ -1126,19 +1120,24 @@ static inline s64 max_diff(const struct psp_sched_data *q,
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
 		diff = max_t(s64, diff, (s64) (psp_tstamp(skb) - q->clock));
 #endif
+		/* correction for normal class = parent's correction */
+		tt0[0] = tt0[1] = 0;
 		while ((cl2 = cl1->prev)) {
 			if (cl1->t) {
-				t = cl1->rate ? mul_div(len[cl1->direction] +
-							npkt[cl1->direction] *
-							cl1->hw_gap,
-							q->max_rate,
-							cl1->rate) : 0;
+				t = cl1->rate ?
+				    mul_div(len[cl1->direction] +
+					    npkt[cl1->direction] * cl1->hw_gap,
+					    q->max_rate, cl1->rate) : 0;
 				tt[cl1->direction] += t;
 				tt[cl1->direction + 1] += t;
 			}
 			cl1 = cl2;
+			if (cl2->rate) {
+				tt0[0] = tt[0];
+				tt0[1] = tt[1];
+			}
 			*cdiff =
-			    (s64) (cl2->clock - q->clock) - tt[cl2->direction];
+			    (s64) (cl2->clock - q->clock) - tt0[cl2->direction];
 			if (*cdiff > diff)
 				diff = *cdiff;
 		}
@@ -2117,6 +2116,7 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 			}
 		}
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
+		qdisc_skb_cb(skb)->pkt_len = len[cl->direction];
 		if ((err = qdisc_enqueue(skb, cl->qdisc)) != NET_XMIT_SUCCESS) {
 			if (net_xmit_drop_count(err))
 #else
