@@ -956,7 +956,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 						   cl->phaze_bytes -
 						   cl->bps.data, _TIMER_HZ,
 						   mul_div(cl->ewma, _TIMER_HZ,
-							   max_rate) *
+							   q->max_rate) *
 						   npkt[cl->direction]);
 					reset_est(&cl->bps, q->clock,
 						  cl->phaze_bytes);
@@ -964,7 +964,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			} else {
 				/* estimate real class rate */
 				calc_rate(&cl->bps, q->clock, cl->phaze_bytes,
-					  max_rate,
+					  q->max_rate,
 					  cl->ewma * npkt[cl->direction]);
 				/* if () psp_class_est(cl,cl->bps.etime); */
 			}
@@ -1115,8 +1115,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 				continue;
 			d = cdiff;
 			for (cl1 = cl->parent; cl1; cl1 = cl1->parent)
-				d = max_t(s64, d,
-					  (s64) (cl1->clock - q->clock));
+				d = max_t(s64, d, cl1->clock - q->clock);
 		} else if ((!cl->level)
 			   /* packet alredy prefetched... */
 			   && ((skb = cl->skb)
@@ -1135,10 +1134,12 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 			tt[0] = tt[1] = tt[2] = len[0] = skb->len;
 			len[1] = SKB_BACKSIZE(skb);
 			npkt[1] = DIV_ROUND_UP(len[1], q->mtu);
-			cdiff = d = (s64) (cl1->clock - q->clock) -
+			cdiff = (s64) (cl1->clock - q->clock) -
 			    (cl1->rate ? len[0] : 0);
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-			d = max_t(s64, d, (s64) (psp_tstamp(skb) - q->clock));
+			d = max_t(s64, cdiff, psp_tstamp(skb) - q->clock);
+#else
+			d = cdiff;
 #endif
 			/* correction for normal class = parent's correction */
 			tt0[0] = tt0[1] = 0;
