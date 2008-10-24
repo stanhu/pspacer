@@ -597,7 +597,7 @@ static int psp_init(struct Qdisc *sch, struct nlattr *opt)
 
 	if (dev->ethtool_ops && dev->ethtool_ops->get_settings) {
 		if (dev->ethtool_ops->get_settings(dev, &cmd) == 0) {
-			phy_rate = cmd.speed * 1000000;
+			phy_rate = (u64)cmd.speed * 1000000;
 			do_div(phy_rate, BITS_PER_BYTE);
 		}
 	}
