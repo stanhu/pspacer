@@ -1089,95 +1089,86 @@ static inline clock_delta cut_gap(struct psp_sched_data *q, clock_delta gap)
  * Currently tt alredy added (cl->tt). Calc next_tt.
  */
 
-/* return max clock diff for hierarchy and this class corrected diff */
-static inline s64 max_diff(const struct psp_sched_data *q,
-			   struct psp_class *cl, s64 * cdiff)
-{
-	s64 diff;
-	struct sk_buff *skb;
-	clock_delta tt[3], tt0[2], t;
-	unsigned long len[2];
-	unsigned int npkt[2];
-	struct psp_class *cl2, *cl1 = NULL;
-
-	for (cl2 = cl; cl2; cl2 = cl2->parent) {
-		cl2->prev = cl1;
-		cl1 = cl2;
-	}
-	*cdiff = diff = (s64) (cl1->clock - q->clock);
-	/* packet alredy prefetched... */
-	if ((skb = cl->skb) ||
-	    /* or pfifo simple lookup success... */
-	    ((skb = cl->qdisc->q.next) && skb != (void *)&cl->qdisc->q) ||
-	    /* or prefetch packet from unknown leaf */
-	    (cl->qdisc->q.qlen
-	     && (skb = cl->skb = cl->qdisc->ops->dequeue(cl->qdisc)))
-	    ) {
-		npkt[0] = 1;
-		tt[0] = tt[1] = tt[2] = len[0] = skb->len;
-		len[1] = SKB_BACKSIZE(skb);
-		npkt[1] = DIV_ROUND_UP(len[1], q->mtu);
-		if (cl1->rate)
-			*cdiff = diff -= len[0];
-#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-		diff = max_t(s64, diff, (s64) (psp_tstamp(skb) - q->clock));
-#endif
-		/* correction for normal class = parent's correction */
-		tt0[0] = tt0[1] = 0;
-		while ((cl2 = cl1->prev)) {
-			if (cl1->t) {
-				t = cl1->rate ?
-				    mul_div(len[cl1->direction] +
-					    npkt[cl1->direction] * cl1->hw_gap,
-					    q->max_rate, cl1->rate) : 0;
-				tt[cl1->direction] += t;
-				tt[cl1->direction + 1] += t;
-			}
-			cl1 = cl2;
-			if (cl2->rate) {
-				tt0[0] = tt[0];
-				tt0[1] = tt[1];
-			}
-			*cdiff =
-			    (s64) (cl2->clock - q->clock) - tt0[cl2->direction];
-			if (*cdiff > diff)
-				diff = *cdiff;
-		}
-	} else {
-		while ((cl1 = cl1->prev)) {
-			*cdiff = (s64) (cl1->clock - q->clock);
-			if (*cdiff > diff)
-				diff = *cdiff;
-		}
-	}
-	return diff;
-}
-
 static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 						   *q, struct list_head *list,
 						   clock_delta * diff)
 {
 	struct psp_class *cl, *next = NULL;
 	s64 d, nextdiff, cdiff, nextcdiff;
+	struct sk_buff *skb;
+	clock_delta tt[3], tt0[2], t;
+	unsigned long len[2];
+	unsigned int npkt[2];
+	struct psp_class *cl2, *cl1;
 
 	/* signed diff still correct around clock overflow... */
 	list_for_each_entry(cl, list, plist) {
 		if (!(cl->state & FLAG_ACTIVE)) {
 			if (cl->state & FLAG_DMARK)	/* ...but not too far */
 				continue;
-			if ((s64) (cl->clock - q->clock) <= 0) {
+			cdiff = (s64) (cl->clock - q->clock);
+			if (cdiff <= 0) {
 				cl->state |= FLAG_DMARK;
 				continue;
 			}
-		}
-		if (!cl->level) {
-			d = max_diff(q, cl, &cdiff);
-			if (next == NULL || nextdiff > d
-			    || (nextdiff == d && nextcdiff > cdiff)) {
-				next = cl;
-				nextdiff = d;
-				nextcdiff = cdiff;
+			if (cl->level)
+				continue;
+			d = cdiff;
+			for (cl1 = cl->parent; cl1; cl1 = cl1->parent)
+				d = max_t(s64, d,
+					  (s64) (cl1->clock - q->clock));
+		} else if ((!cl->level)
+			   /* packet alredy prefetched... */
+			   && ((skb = cl->skb)
+			       /* or pfifo simple lookup success... */
+			       || ((skb = cl->qdisc->q.next)
+				   && skb != (void *)&cl->qdisc->q)
+			       /* or prefetch packet from unknown leaf */
+			       || (skb = cl->skb =
+				   cl->qdisc->ops->dequeue(cl->qdisc)))) {
+			cl1 = NULL;
+			for (cl2 = cl; cl2; cl2 = cl2->parent) {
+				cl2->prev = cl1;
+				cl1 = cl2;
 			}
+			npkt[0] = 1;
+			tt[0] = tt[1] = tt[2] = len[0] = skb->len;
+			len[1] = SKB_BACKSIZE(skb);
+			npkt[1] = DIV_ROUND_UP(len[1], q->mtu);
+			cdiff = d = (s64) (cl1->clock - q->clock) -
+			    (cl1->rate ? len[0] : 0);
+#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
+			d = max_t(s64, d, (s64) (psp_tstamp(skb) - q->clock));
+#endif
+			/* correction for normal class = parent's correction */
+			tt0[0] = tt0[1] = 0;
+			while ((cl2 = cl1->prev)) {
+				if (cl1->t) {
+					t = cl1->rate ?
+					    mul_div(len[cl1->direction] +
+						    npkt[cl1->direction] *
+						    cl1->hw_gap, q->max_rate,
+						    cl1->rate) : 0;
+					tt[cl1->direction] += t;
+					tt[cl1->direction + 1] += t;
+				}
+				cl1 = cl2;
+				if (cl2->rate) {
+					tt0[0] = tt[0];
+					tt0[1] = tt[1];
+				}
+				cdiff = (s64) (cl2->clock - q->clock) -
+				    tt0[cl2->direction];
+				if (cdiff > d)
+					d = cdiff;
+			}
+		} else		/* not leaf or exception */
+			continue;
+		if (next == NULL || nextdiff > d
+		    || (nextdiff == d && nextcdiff > cdiff)) {
+			next = cl;
+			nextdiff = d;
+			nextcdiff = cdiff;
 		}
 	}
 	if (next && nextdiff > 0) {
