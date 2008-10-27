@@ -17,8 +17,6 @@
 # Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
 #
 MANDIR		:= $(DESTDIR)/usr/share/man
-TEMP		:= /tmp/tc-psp.8
-EUC2UTF8	:= iconv -f euc-jp	# or "nkf -w"
 
 INSTALL		:= @INSTALL@
 INSTALL_PROGRAM	:= @INSTALL_PROGRAM@
@@ -30,14 +28,3 @@ all:
 install:
 	test -d $(MANDIR)/man8 || mkdir -p $(MANDIR)/man8
 	$(INSTALL_DATA) man8/tc-psp.8 $(MANDIR)/man8
-ifeq ($(LANG), ja_JP.UTF-8)
-	$(EUC2UTF8) ja/man8/tc-psp.8 > $(TEMP)
-	test -d $(MANDIR)/ja/man8 || mkdir -p $(MANDIR)/ja/man8
-	$(INSTALL_DATA) $(TEMP) $(MANDIR)/ja/man8
-	rm $(TEMP)
-endif
-ifeq ($(LANG), ja_JP.eucJP)
-	test -d $(MANDIR)/ja/man8 || mkdir -p $(MANDIR)/ja/man8
-	$(INSTALL_DATA) ja/man8/tc-psp.8
-	$(MANDIR)/ja/man8
-endif

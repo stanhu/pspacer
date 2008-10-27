@@ -28,14 +28,6 @@ ifeq ($(KERNELRELEASE),)
 KERNELRELEASE	:= $(shell uname -r)
 endif
 
-ifneq ($(findstring 2.6,$(KERNELRELEASE)),)
-export-objs	:=
-list-multi	:=
-KMODSUF		:= ko
-else
-KMODSUF		:= o
-endif
-
 ifeq ($(KERNELPATH),)
 KERNELPATH	:= /lib/modules/$(KERNELRELEASE)/build
 endif
@@ -53,13 +45,13 @@ all:
 
 sch_psp.o:
 ifneq ($(findstring 2.6,$(KERNELRELEASE)),)
-	$(LD) -o sch_psp.$(KMODSUF) -r $(psp-objs)
+	$(LD) -o sch_psp.ko -r $(psp-objs)
 endif
 
 install:
-	#strip -S sch_psp.$(KMODSUF)
+	#strip -S sch_psp.ko
 	test -d $(MODULEPATH) || mkdir -p $(MODULEPATH)
-	install -m 0644 sch_psp.$(KMODSUF) $(MODULEPATH)
+	install -m 0644 sch_psp.ko $(MODULEPATH)
 ifeq ($(DESTDIR),)
 	/sbin/depmod -ae
 endif
