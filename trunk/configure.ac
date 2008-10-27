@@ -1,4 +1,4 @@
-dnl configure.in
+dnl configure.ac
 
 dnl outline
 dnl 1. AC_INIT
