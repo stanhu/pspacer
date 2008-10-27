@@ -16,9 +16,9 @@
 # along with this program; if not, write to the Free Software Foundation,
 # Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
 #
-IPROUTE2_SRC	:= @IPROUTE2_SRC@
+IPROUTE_INC	:= @IPROUTE_INC@
 TC_COMPAT	:= @TC_COMPAT@
-TCLIB_DIR	:= $(DESTDIR)/usr/lib/tc
+TCLIB_DIR	:= $(DESTDIR)@TCLIB_DIR@
 
 INSTALL		:= @INSTALL@
 INSTALL_PROGRAM	:= @INSTALL_PROGRAM@
@@ -27,7 +27,7 @@ INSTALL_DATA	:= @INSTALL_DATA@
 
 TARGET		:= q_psp.so
 OBJS		:= q_psp.o
-CFLAGS		:= -g -Wall -fPIC -I $(IPROUTE2_SRC)/include -I $(IPROUTE2_SRC)/tc -I ../kernel
+CFLAGS		:= -g -Wall -fPIC -I ../kernel $(IPROUTE_INC)
 
 # for compat
 ifeq ($(TC_COMPAT),yes)
