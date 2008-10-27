@@ -21,7 +21,7 @@ switch/router to which the system is connected.  It is recommended to
 disable IEEE802.3x flow control function of the network switch (to which 
 a PC with PSPacer is connected) in order to avoid unexpected behavior.
 For your information, see our PFLDnet2005 paper <<PFLDnet05>>, and the Web 
-page http://www.gridmpi.org/gridtcp.jsp.
+page http://www.gridmpi.org/pspacer.jsp.
 
 
 == Compilation

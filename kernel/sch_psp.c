@@ -2344,7 +2344,7 @@ static u64 _phy_rate(struct Qdisc *sch)
 	    && qdisc_dev(sch)->ethtool_ops->get_settings) {
 		if (qdisc_dev(sch)->ethtool_ops->
 		    get_settings(qdisc_dev(sch), &cmd) == 0) {
-			phy_rate = cmd.speed * (1000000 / BITS_PER_BYTE);
+			phy_rate = (u64)cmd.speed * (1000000 / BITS_PER_BYTE);
 		}
 	}
 #endif

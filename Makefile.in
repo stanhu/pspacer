@@ -18,10 +18,8 @@
 #
 PACKAGE		:= @PACKAGE_STRING@
 KERNELRELEASE	:= $(shell uname -r)
-IPROUTE2	:= @IPROUTE2@
-IPROUTE2_SRC	:= @IPROUTE2_SRC@
 LIBNL		:= @LIBNL@
-LIBNL_SRC	:= @LIBNL_SRC@
+LIBNL_DIR	:= @LIBNL_DIR@
 
 INSTALL		:= @INSTALL@
 INSTALL_PROGRAM	:= @INSTALL_PROGRAM@
@@ -30,11 +28,9 @@ INSTALL_DATA	:= @INSTALL_DATA@
 
 all:
 	$(MAKE) -C kernel
-ifeq ($(IPROUTE2), yes)
 	$(MAKE) -C tc
-endif
 ifeq ($(LIBNL), yes)
-	$(MAKE) -C $(LIBNL_SRC)
+	$(MAKE) -C $(LIBNL_DIR)
 	$(MAKE) -C pspd
 endif
 
@@ -43,12 +39,10 @@ docs:
 
 install:
 	$(MAKE) -C kernel install DESTDIR=$(DESTDIR)
-ifeq ($(IPROUTE2), yes)
 	$(MAKE) -C tc install DESTDIR=$(DESTDIR)
 	$(MAKE) -C man install DESTDIR=$(DESTDIR)
-endif
 ifeq ($(LIBNL), yes)
-	$(MAKE) -C $(LIBNL_SRC) install DESTDIR=$(DESTDIR)
+	$(MAKE) -C $(LIBNL_DIR) install DESTDIR=$(DESTDIR)
 	$(MAKE) -C pspd install DESTDIR=$(DESTDIR)
 endif
 
@@ -60,11 +54,9 @@ dist:	distclean
 
 clean:
 	$(MAKE) -C kernel clean
-ifeq ($(IPROUTE2), yes)
 	$(MAKE) -C tc clean
-endif
 ifeq ($(LIBNL), yes)
-	$(MAKE) -C $(LIBNL_SRC) clean
+	$(MAKE) -C $(LIBNL_DIR) clean
 endif
 	$(MAKE) -C pspd clean
 	$(MAKE) -C doc clean
@@ -72,29 +64,8 @@ endif
 	find  . -name ".#*" | xargs rm -f
 
 distclean: clean
-#ifeq ($(IPROUTE2), yes)
-#	rm -rf $(IPROUTE2_SRC)
-#endif
-#ifeq ($(LIBNL), yes)
-#	rm -rf $(LIBNL_SRC)
-#endif
 	find . -name "Makefile" | xargs rm -f
 	rm -f config.log config.options config.status
 	rm -rf autom*
-	rm -f README.en.html README.ja.html
+	rm -f README.en.html
 	rm -f $(PACKAGE).tar.gz
-
-deb-prepare:
-	sed s%_KVERS_%$(KERNELRELEASE)%g debian/control.in > debian/control
-	sed s%_KVERS_%$(KERNELRELEASE)%g debian/rules.in > debian/rules
-	chmod +x debian/rules
-
-deb: deb-prepare
-	dpkg-buildpackage -rfakeroot -us -uc -tc
-
-deb-clean:
-	rm -f debian/control
-	rm -f debian/rules
-	if [ -f ./build-stamp ]; then \
-		fakeroot debian/rules clean; \
-	fi
