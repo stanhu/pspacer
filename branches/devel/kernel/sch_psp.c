@@ -286,6 +286,7 @@ struct psp_class {
 	struct est_data back_bps;
 
 	u64 phaze_bytes;
+	int npkt;
 	u64 time;		/* to sync */
 	unsigned long ewma;
 
@@ -920,28 +921,16 @@ static inline unsigned long estimate_qdisc_rate(struct Qdisc *sch,
 static inline void estimate_class_rate(struct psp_class *cl,
 				       struct psp_sched_data *q, int npkt)
 {
-	if (!cl->autorate) {
-		if (q->phaze_idle) {
-			/* wall clock are dirty */
-			/* calc rate by realtime & reset estimator */
-			if (cl->time != q->time) {
-				cl->time = q->time;
-				calc_rate_(&cl->bps, q->phaze_time,
-					   cl->phaze_bytes - cl->bps.data,
-					   _TIMER_HZ, mul_div(cl->ewma,
-							      _TIMER_HZ,
-							      q->max_rate) *
-					   npkt);
-				reset_est(&cl->bps, q->clock, cl->phaze_bytes);
-			}
-		} else {
-			/* estimate real class rate */
-			calc_rate(&cl->bps, q->clock, cl->phaze_bytes,
-				  q->max_rate, cl->ewma * npkt);
-			/* if () psp_class_est(cl,cl->bps.etime); */
-		}
+	if ((cl->state & FLAG_DMARK))
+		reset_est(&cl->bps, q->clock, cl->phaze_bytes);
+	else {
+		/* estimate real class rate */
+		/* for backrate - ewma *= npkt (multi-pkt power down) */
+		calc_rate(&cl->bps, q->clock, cl->phaze_bytes, q->max_rate,
+			  cl->ewma * npkt);
+		/* if () psp_class_est(cl,cl->bps.etime); */
+		cl->qdisc->rate_est.bps = cl->bps.av;
 	}
-	cl->qdisc->rate_est.bps = cl->bps.av;
 }
 
 static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
@@ -962,6 +951,16 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	for (; cl; cl = cl->parent) {
 		cl->prev = cl1;
 		cl1 = cl;
+#ifdef CONFIG_NET_SCH_PSP_EST
+		estimate_class_rate(cl, q, cl->npkt);
+#endif
+		if (cl->autorate) {
+#ifndef CONFIG_NET_SCH_PSP_EST
+			estimate_class_rate(cl, q, cl->npkt);
+#endif
+			cl->rate =
+			    cl->bps.av < MIN_TARGET_RATE ? 0 : cl->bps.av;
+		}
 	}
 	/* for NORMAL class */
 	parent_clock =
@@ -970,7 +969,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	    /* update qdisc clock */
 	    q->clock0 = q->clock += skb->len + HW_GAP(q) + FCS;
 	/* list classes from parent to child */
-	for (cl = cl1; cl; cl = cl->parent) {
+	for (cl = cl1; cl; cl = cl->prev) {
 		d = cl->direction;
 		t = len[d] + npkt[d] * cl->hw_gap;
 		if ((cl->state & FLAG_DMARK)) {
@@ -986,8 +985,8 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		if (!t)
 			goto gap0;
 #ifdef CONFIG_NET_SCH_PSP_EST
-		estimate_class_rate(cl, q, npkt[d]);
 		cl->phaze_bytes += t;
+		cl->npkt = npkt[d];
 #endif
 		if (!cl->rate)
 			goto normal;
@@ -1004,8 +1003,12 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		case TC_PSP_MODE_ESTIMATED_GAP:
 		case TC_PSP_MODE_STATIC:
 			/* hardware/ethernet */
+#ifdef CONFIG_NET_SCH_PSP_RATESAFE
+			MUL_DIV_ROUND(t, t, q->max_rate, cl->rate, cl->tail);
+#else
 			t = t * q->max_rate + cl->rate - 1;
 			do_div(t, cl->rate);
+#endif
 			clock[d] = clock[d + 1] = cl->clock += (cl->t = t);
 			break;
 		case TC_PSP_MODE_STATIC_RATE:
@@ -2344,7 +2347,7 @@ static u64 _phy_rate(struct Qdisc *sch)
 	    && qdisc_dev(sch)->ethtool_ops->get_settings) {
 		if (qdisc_dev(sch)->ethtool_ops->
 		    get_settings(qdisc_dev(sch), &cmd) == 0) {
-			phy_rate = (u64)cmd.speed * (1000000 / BITS_PER_BYTE);
+			phy_rate = (u64) cmd.speed * (1000000 / BITS_PER_BYTE);
 		}
 	}
 #endif
@@ -2642,7 +2645,7 @@ static int psp_dump_class(struct Qdisc *sch, unsigned long arg,
 	copt.chk = sizeof(copt);
 	copt.level = cl->level;
 	copt.mode = cl->state & MODE_MASK;
-	copt.rate = cl->max_rate;
+	copt.rate = cl->rate;
 	NLA_PUT(skb, TCA_PSP_COPT, sizeof(copt), &copt);
 	NLA_PUT(skb, TCA_PSP_QOPT, 0, NULL);	/* ??? */
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,10)
