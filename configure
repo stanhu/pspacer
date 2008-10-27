@@ -274,7 +274,7 @@ PACKAGE_STRING='pspacer  '
 PACKAGE_BUGREPORT='takano-ryousei@aist.go.jp'
 
 ac_subdirs_all="$ac_subdirs_all libnl.temp"
-ac_subst_vars='SHELL PATH_SEPARATOR PACKAGE_NAME PACKAGE_TARNAME PACKAGE_VERSION PACKAGE_STRING PACKAGE_BUGREPORT exec_prefix prefix program_transform_name bindir sbindir libexecdir datadir sysconfdir sharedstatedir localstatedir libdir includedir oldincludedir infodir mandir build_alias host_alias target_alias DEFS ECHO_C ECHO_N ECHO_T LIBS RELEASE_DATE TC_COMPAT DEBUG_COPT IPROUTE2 IPROUTE2_SRC LIBNL LIBNL_SRC subdirs CC CFLAGS LDFLAGS CPPFLAGS ac_ct_CC EXEEXT OBJEXT INSTALL_PROGRAM INSTALL_SCRIPT INSTALL_DATA LIBOBJS LTLIBOBJS'
+ac_subst_vars='SHELL PATH_SEPARATOR PACKAGE_NAME PACKAGE_TARNAME PACKAGE_VERSION PACKAGE_STRING PACKAGE_BUGREPORT exec_prefix prefix program_transform_name bindir sbindir libexecdir datadir sysconfdir sharedstatedir localstatedir libdir includedir oldincludedir infodir mandir build_alias host_alias target_alias DEFS ECHO_C ECHO_N ECHO_T LIBS RELEASE_DATE TC_COMPAT DEBUG_COPT IPROUTE_INC TCLIB_DIR LIBNL LIBNL_DIR subdirs CC CFLAGS LDFLAGS CPPFLAGS ac_ct_CC EXEEXT OBJEXT INSTALL_PROGRAM INSTALL_SCRIPT INSTALL_DATA LIBOBJS LTLIBOBJS'
 ac_subst_files=''
 
 # Initialize some variables set by options.
@@ -808,11 +808,10 @@ Optional Features:
 Optional Packages:
   --with-PACKAGE[=ARG]    use PACKAGE [ARG=yes]
   --without-PACKAGE       do not use PACKAGE (same as --with-PACKAGE=no)
-  --with-iproute2         build the module for tc (8)
   --with-iproute2-dir=DIR specify the iproute2 directory (default
                           /opt/iproute2)
-  --with-iproute2-pkg=FILE
-                          use this iproute2 package
+  --with-tclib-dir=DIR    specify the tc lib directory (default /usr/lib/tc
+                          for i368, /usr/lib64/tc for x86_64)
   --with-libnl            use the libnl library
   --with-libnl-dir=DIR    specify the libnl directory (default /opt/linl)
   --with-libnl-pkg=FILE   use this libnl package
@@ -1301,6 +1300,18 @@ if test "$tmp" != "$compatver" ; then
     TC_COMPAT=yes
 fi
 
+arch=`uname -i`
+if test "$arch" == "x86_64" ; then
+    tclib_dir="/usr/lib64/tc"
+else
+    tclib_dir="/usr/lib/tc"
+fi
+
+function fullpath {
+    (cd `dirname $1`; pwd) \
+    | tr -d "\n"; echo /`basename $1`
+}
+
 ###
 ### 2. options (AC_ARG_ENABLE)
 ###
@@ -1327,74 +1338,42 @@ esac
 
 
 
-# Check whether --with-iproute2 or --without-iproute2 was given.
-if test "${with_iproute2+set}" = set; then
-  withval="$with_iproute2"
-
-else
-  with_iproute2=yes
-fi;
-
-
 # Check whether --with-iproute2_dir or --without-iproute2_dir was given.
 if test "${with_iproute2_dir+set}" = set; then
   withval="$with_iproute2_dir"
-  with_iproute2=yes
+
 else
   with_iproute2_dir=/opt/iproute2
 fi;
 
 
-# Check whether --with-iproute2_pkg or --without-iproute2_pkg was given.
-if test "${with_iproute2_pkg+set}" = set; then
-  withval="$with_iproute2_pkg"
-  with_iproute2=yes
+# Check whether --with-tclib_dir or --without-tclib_dir was given.
+if test "${with_tclib_dir+set}" = set; then
+  withval="$with_tclib_dir"
+
 else
-  with_iproute2_pkg=no
+  with_tclib_dir=${tclib_dir}
 fi;
 
-if test ${with_iproute2_pkg} != "no"; then
-    test -d iproute2* && echo "The iproute2 directory already exists." && exit 1
-    test ! -f ${with_iproute2_pkg} && echo "File is not found: ${with_iproute2_pkg}" && exit 1
+abs_iproute2_dir=""
+case ${with_iproute2_dir} in
+    /*) # absolute path
+	abs_iproute2_dir=${with_iproute2_dir}
+	;;
+    *) # relative path
+	abs_iproute2_dir=`fullpath ${with_iproute2_dir}`
+	;;
+esac
 
-    echo "Uncompress $with_iproute2_pkg"
-    case "${with_iproute2_pkg}" in
-    *.tgz)
-	tar zxf ${with_iproute2_pkg}
-	;;
-    *.tar.gz)
-	tar zxf ${with_iproute2_pkg}
-	;;
-    *.tar.bz2)
-	tar jxf ${with_iproute2_pkg}
-	;;
-    esac
-
-    for d in iproute2*; do
-	if test -d $d; then
-	    with_iproute2_dir=$d
-	    break;
-	fi
-    done
+if test ! -d ${with_iproute2_dir}; then
+    echo "${with_iproute2_dir} does not exist."
+    exit 1
 fi
 
-if test ${with_iproute2} != "no"; then
-    IPROUTE2=${with_iproute2}
-    case ${with_iproute2_dir} in
-	/*)
-	    IPROUTE2_SRC=`dirname ${with_iproute2_dir}`
-	    ;;
-	*)
-	    IPROUTE2_SRC=`dirname ${PWD}/${with_iproute2_dir}`
-	    ;;
-    esac
-    IPROUTE2_SRC=${IPROUTE2_SRC}/`basename ${with_iproute2_dir}`
+IPROUTE_INC="-I ${abs_iproute2_dir}/include -I ${abs_iproute2_dir}/tc"
 
-    if test ! -d ${IPROUTE2_SRC}; then
-	echo "${IPROUTE2_SRC} does not exist."
-	exit 1
-    fi
-fi
+TCLIB_DIR=${with_tclib_dir}
+
 
 
 
@@ -1444,13 +1423,13 @@ if test ${with_libnl} != "no"; then
     LIBNL=${with_libnl}
     case ${with_libnl_dir} in
 	/*)
-	    LIBNL_SRC=`dirname ${with_libnl_dir}`
+	    LIBNL_DIR=`dirname ${with_libnl_dir}`
 	    ;;
 	*)
-	    LIBNL_SRC=`dirname ${PWD}/${with_libnl_dir}`
+	    LIBNL_DIR=`dirname ${PWD}/${with_libnl_dir}`
 	    ;;
     esac
-    LIBNL_SRC=${LIBNL_SRC}/`basename ${with_libnl_dir}`
+    LIBNL_DIR=${LIBNL_DIR}/`basename ${with_libnl_dir}`
 
     test -L libnl.temp && rm libnl.temp
     ln -s ${with_libnl_dir} libnl.temp
@@ -2524,16 +2503,15 @@ echo "Configuration"
 (
 
 echo "  --enable-debug                  ${enable_debug}"
-echo "  --with-iproute2                 ${with_iproute2}"
-echo "  --with-iproute2-pkg             ${with_iproute2_pkg}"
 echo "  --with-iproute2-dir             ${with_iproute2_dir}"
+echo "  --with-tclib-dir                ${with_tclib_dir}"
 echo "  --with-libnl                    ${with_libnl}"
 echo "  --with-libnl-pkg                ${with_libnl_pkg}"
 echo "  --with-libnl-dir                ${with_libnl_dir}"
 ) | tee config.options
 echo ""
 
-                                                                                                    ac_config_files="$ac_config_files Makefile pspacer.spec kernel/Makefile tc/Makefile pspd/Makefile doc/Makefile doc/README doc/README.ja doc/usage.en.txt man/Makefile"
+                                                                                          ac_config_files="$ac_config_files Makefile pspacer.spec kernel/Makefile tc/Makefile pspd/Makefile doc/Makefile doc/README doc/usage.en.txt man/Makefile"
 
 cat >confcache <<\_ACEOF
 # This file is a shell script that caches the results of configure
@@ -3093,7 +3071,6 @@ do
   "pspd/Makefile" ) CONFIG_FILES="$CONFIG_FILES pspd/Makefile" ;;
   "doc/Makefile" ) CONFIG_FILES="$CONFIG_FILES doc/Makefile" ;;
   "doc/README" ) CONFIG_FILES="$CONFIG_FILES doc/README" ;;
-  "doc/README.ja" ) CONFIG_FILES="$CONFIG_FILES doc/README.ja" ;;
   "doc/usage.en.txt" ) CONFIG_FILES="$CONFIG_FILES doc/usage.en.txt" ;;
   "man/Makefile" ) CONFIG_FILES="$CONFIG_FILES man/Makefile" ;;
   *) { { echo "$as_me:$LINENO: error: invalid argument: $ac_config_target" >&5
@@ -3182,10 +3159,10 @@ s,@LIBS@,$LIBS,;t t
 s,@RELEASE_DATE@,$RELEASE_DATE,;t t
 s,@TC_COMPAT@,$TC_COMPAT,;t t
 s,@DEBUG_COPT@,$DEBUG_COPT,;t t
-s,@IPROUTE2@,$IPROUTE2,;t t
-s,@IPROUTE2_SRC@,$IPROUTE2_SRC,;t t
+s,@IPROUTE_INC@,$IPROUTE_INC,;t t
+s,@TCLIB_DIR@,$TCLIB_DIR,;t t
 s,@LIBNL@,$LIBNL,;t t
-s,@LIBNL_SRC@,$LIBNL_SRC,;t t
+s,@LIBNL_DIR@,$LIBNL_DIR,;t t
 s,@subdirs@,$subdirs,;t t
 s,@CC@,$CC,;t t
 s,@CFLAGS@,$CFLAGS,;t t

@@ -44,6 +44,18 @@ if test "$tmp" != "$compatver" ; then
     TC_COMPAT=yes
 fi
 
+arch=`uname -i`
+if test "$arch" == "x86_64" ; then
+    tclib_dir="/usr/lib64/tc"
+else
+    tclib_dir="/usr/lib/tc"
+fi
+
+function fullpath {
+    (cd `dirname $1`; pwd) \
+    | tr -d "\n"; echo /`basename $1`
+}
+
 ###
 ### 2. options (AC_ARG_ENABLE)
 ###
@@ -64,69 +76,43 @@ esac
 
 dnl iproute2
 
-AC_SUBST(IPROUTE2)
-AC_SUBST(IPROUTE2_SRC)
-
-AC_ARG_WITH(iproute2,
-    AS_HELP_STRING([--with-iproute2], [build the module for tc (8)]), 
-    [], [with_iproute2=yes])
+AC_SUBST(IPROUTE_INC)
+AC_SUBST(TCLIB_DIR)
 
 AC_ARG_WITH(iproute2_dir,
     AS_HELP_STRING([--with-iproute2-dir=DIR],
     [specify the iproute2 directory (default /opt/iproute2)]),
-    [with_iproute2=yes], [with_iproute2_dir=/opt/iproute2])
+    [], [with_iproute2_dir=/opt/iproute2])
 
-AC_ARG_WITH(iproute2_pkg,
-    AS_HELP_STRING([--with-iproute2-pkg=FILE], [use this iproute2 package]),
-     [with_iproute2=yes], with_iproute2_pkg=no)
+AC_ARG_WITH(tclib_dir,
+    AS_HELP_STRING([--with-tclib-dir=DIR],
+    [specify the tc lib directory (default /usr/lib/tc for i368, /usr/lib64/tc for x86_64)]),
+     [], [with_tclib_dir=${tclib_dir}])
 
-if test ${with_iproute2_pkg} != "no"; then
-    test -d iproute2* && echo "The iproute2 directory already exists." && exit 1
-    test ! -f ${with_iproute2_pkg} && echo "File is not found: ${with_iproute2_pkg}" && exit 1
-
-    echo "Uncompress $with_iproute2_pkg"
-    case "${with_iproute2_pkg}" in
-    *.tgz)
-	tar zxf ${with_iproute2_pkg}
+abs_iproute2_dir=""
+case ${with_iproute2_dir} in
+    /*) # absolute path
+	abs_iproute2_dir=${with_iproute2_dir}
 	;;
-    *.tar.gz)
-	tar zxf ${with_iproute2_pkg}
+    *) # relative path
+	abs_iproute2_dir=`fullpath ${with_iproute2_dir}`
 	;;
-    *.tar.bz2)
-	tar jxf ${with_iproute2_pkg}
-	;;
-    esac
+esac
 
-    for d in iproute2*; do
-	if test -d $d; then
-	    with_iproute2_dir=$d
-	    break;
-	fi
-    done
+if test ! -d ${with_iproute2_dir}; then
+    echo "${with_iproute2_dir} does not exist."
+    exit 1
 fi
 
-if test ${with_iproute2} != "no"; then
-    IPROUTE2=${with_iproute2}
-    case ${with_iproute2_dir} in
-	/*)
-	    IPROUTE2_SRC=`dirname ${with_iproute2_dir}`
-	    ;;
-	*)
-	    IPROUTE2_SRC=`dirname ${PWD}/${with_iproute2_dir}`
-	    ;;
-    esac
-    IPROUTE2_SRC=${IPROUTE2_SRC}/`basename ${with_iproute2_dir}`
+IPROUTE_INC="-I ${abs_iproute2_dir}/include -I ${abs_iproute2_dir}/tc"
 
-    if test ! -d ${IPROUTE2_SRC}; then
-	echo "${IPROUTE2_SRC} does not exist."
-	exit 1
-    fi
-fi
+TCLIB_DIR=${with_tclib_dir}
+
 
 dnl libnl
 
 AC_SUBST(LIBNL)
-AC_SUBST(LIBNL_SRC)
+AC_SUBST(LIBNL_DIR)
 
 AC_ARG_WITH(libnl,
     AS_HELP_STRING([--with-libnl], [use the libnl library]), 
@@ -158,13 +144,13 @@ if test ${with_libnl} != "no"; then
     LIBNL=${with_libnl}
     case ${with_libnl_dir} in
 	/*)
-	    LIBNL_SRC=`dirname ${with_libnl_dir}`
+	    LIBNL_DIR=`dirname ${with_libnl_dir}`
 	    ;;
 	*)
-	    LIBNL_SRC=`dirname ${PWD}/${with_libnl_dir}`
+	    LIBNL_DIR=`dirname ${PWD}/${with_libnl_dir}`
 	    ;;
     esac
-    LIBNL_SRC=${LIBNL_SRC}/`basename ${with_libnl_dir}`
+    LIBNL_DIR=${LIBNL_DIR}/`basename ${with_libnl_dir}`
 
     test -L libnl.temp && rm libnl.temp
     ln -s ${with_libnl_dir} libnl.temp
@@ -203,9 +189,8 @@ echo "Configuration"
 (
 
 echo "  --enable-debug                  ${enable_debug}"
-echo "  --with-iproute2                 ${with_iproute2}"
-echo "  --with-iproute2-pkg             ${with_iproute2_pkg}"
 echo "  --with-iproute2-dir             ${with_iproute2_dir}"
+echo "  --with-tclib-dir                ${with_tclib_dir}"
 echo "  --with-libnl                    ${with_libnl}"
 echo "  --with-libnl-pkg                ${with_libnl_pkg}"
 echo "  --with-libnl-dir                ${with_libnl_dir}"
@@ -219,7 +204,6 @@ AC_CONFIG_FILES([Makefile
 	pspd/Makefile
 	doc/Makefile
 	doc/README
-	doc/README.ja
 	doc/usage.en.txt
 	man/Makefile])
 AC_OUTPUT
