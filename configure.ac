@@ -100,11 +100,16 @@ case ${with_iproute2_dir} in
 esac
 
 if test ! -d ${with_iproute2_dir}; then
-    echo "${with_iproute2_dir} does not exist."
-    exit 1
+    # For checking Debian iproute-dev package.
+    if test -d /usr/include/iproute; then
+        IPROUTE_INC="-I /usr/include/iproute"
+    else
+        echo "${with_iproute2_dir} does not exist."
+        exit 1
+    fi
+else
+    IPROUTE_INC="-I ${abs_iproute2_dir}/include -I ${abs_iproute2_dir}/tc"
 fi
-
-IPROUTE_INC="-I ${abs_iproute2_dir}/include -I ${abs_iproute2_dir}/tc"
 
 TCLIB_DIR=${with_tclib_dir}
 
