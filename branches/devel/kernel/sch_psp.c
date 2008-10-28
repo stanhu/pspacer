@@ -264,6 +264,7 @@ struct psp_class {
 	unsigned long allocated_rate;	/* allocated rate to children */
 	u64 clock;		/* class local byte clock */
 	unsigned long tail, tail1;	/* rate division tail */
+	s64 shift;		/* clock shift */
 
 	void *tcphash;		/* tcp "tracking" hash */
 #ifdef TTL
@@ -918,18 +919,15 @@ static inline unsigned long estimate_qdisc_rate(struct Qdisc *sch,
 	return q->bps.av;
 }
 
-static inline void estimate_class_rate(struct psp_class *cl,
-				       struct psp_sched_data *q, int npkt)
+static inline void estimate_class_rate(struct est_data *e, u64 cnt,
+				       struct psp_sched_data *q,
+				       unsigned long ewma)
 {
-	if ((cl->state & FLAG_DMARK))
-		reset_est(&cl->bps, q->clock, cl->phaze_bytes);
-	else {
-		/* estimate real class rate */
-		/* for backrate - ewma *= npkt (multi-pkt power down) */
-		calc_rate(&cl->bps, q->clock, cl->phaze_bytes, q->max_rate,
-			  cl->ewma * npkt);
-		/* if () psp_class_est(cl,cl->bps.etime); */
-		cl->qdisc->rate_est.bps = cl->bps.av;
+	if (q->phaze_idle) {
+		reset_est(e, q->clock, cnt);
+	} else {
+		calc_rate(e, q->clock, cnt, q->max_rate, ewma);
+
 	}
 }
 
@@ -951,21 +949,9 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	for (; cl; cl = cl->parent) {
 		cl->prev = cl1;
 		cl1 = cl;
-#ifdef CONFIG_NET_SCH_PSP_EST
-		estimate_class_rate(cl, q, cl->npkt);
-#endif
-		if (cl->autorate) {
-#ifndef CONFIG_NET_SCH_PSP_EST
-			estimate_class_rate(cl, q, cl->npkt);
-#endif
-			cl->rate =
-			    cl->bps.av < MIN_TARGET_RATE ? 0 : cl->bps.av;
-		}
 	}
-	/* for NORMAL class */
-	parent_clock =
-	    /* for reset */
-	    clock[0] = clock[1] =
+	/* for reset */
+	clock[0] = clock[1] =
 	    /* update qdisc clock */
 	    q->clock0 = q->clock += skb->len + HW_GAP(q) + FCS;
 	/* list classes from parent to child */
@@ -982,12 +968,22 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 #endif
 			    cl->tail = 0;
 		}
+#ifdef CONFIG_NET_SCH_PSP_EST
+		estimate_class_rate(&cl->bps, cl->phaze_bytes +=
+				    t, q, cl->ewma * npkt[d]);
+		cl->qdisc->rate_est.bps = cl->bps.av;
+#endif
+		if (cl->autorate) {
+#ifndef CONFIG_NET_SCH_PSP_EST
+			estimate_class_rate(&cl->bps, cl->phaze_bytes +=
+					    t, q, cl->ewma * npkt[d]);
+#endif
+			cl->rate = min_t(unsigned long, q->max_rate,
+					 cl->bps.av <
+					 MIN_TARGET_RATE ? 0 : cl->bps.av);
+		}
 		if (!t)
 			goto gap0;
-#ifdef CONFIG_NET_SCH_PSP_EST
-		cl->phaze_bytes += t;
-		cl->npkt = npkt[d];
-#endif
 		if (!cl->rate)
 			goto normal;
 #define MUL_DIV_ROUND(res,x,y,z,tail) res=(x)*(y)+tail; tail=do_div(res,(z));
@@ -1009,6 +1005,8 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			t = t * q->max_rate + cl->rate - 1;
 			do_div(t, cl->rate);
 #endif
+			if ((cl->shift = clock[d] - cl->clock) < 0)
+				cl->shift = 0;
 			clock[d] = clock[d + 1] = cl->clock += (cl->t = t);
 			break;
 		case TC_PSP_MODE_STATIC_RATE:
@@ -1041,11 +1039,10 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			cl->rate = cl->max_rate = cl->bps.av;
 		default:
 		      normal:
-			cl->clock = parent_clock;
+			cl->clock = clock[d];
 			break;
 		}
 	      gap0:
-		parent_clock = cl->clock;
 		/* moved from psp_dequeue() */
 		if (--QSTATS(cl).qlen == 0) {
 			QSTATS(cl).backlog = 0;
@@ -1117,7 +1114,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 	/* signed diff still correct around clock overflow... */
 	list_for_each_entry(cl, list, plist) {
 		if (!(cl->state & FLAG_ACTIVE)) {
-			cdiff = cl->clock - q->clock;
+			cdiff = (s64) (cl->clock - q->clock) + cl->shift;
 			if (cdiff <= 0) {
 				cl->state |= FLAG_DMARK;
 				cl->clock = q->clock;	/* ...but not too far */
@@ -1127,7 +1124,9 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 				continue;
 			d = cdiff;
 			for (cl1 = cl->parent; cl1; cl1 = cl1->parent)
-				d = max_t(s64, d, cl1->clock - q->clock);
+				d = max_t(s64, d,
+					  (s64) (cl1->clock - q->clock) +
+					  cl1->shift);
 		} else if ((!cl->level)
 			   /* packet alredy prefetched... */
 			   && ((skb = cl->skb)
@@ -1147,7 +1146,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 			len[1] = SKB_BACKSIZE(skb);
 			npkt[1] = DIV_ROUND_UP(len[1], q->mtu);
 			cdiff = (s64) (cl1->clock - q->clock) -
-			    (cl1->rate ? tt[0] : 0);
+			    (cl1->rate ? tt[0] : 0) + cl1->shift;
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
 			d = max_t(s64, cdiff, psp_tstamp(skb) - q->clock);
 #else
@@ -1171,7 +1170,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 					tt0[1] = tt[1];
 				}
 				cdiff = (s64) (cl2->clock - q->clock) -
-				    tt0[cl2->direction];
+				    tt0[cl2->direction] + cl2->shift;
 				if (cdiff > d)
 					d = cdiff;
 			}
