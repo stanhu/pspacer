@@ -264,7 +264,6 @@ struct psp_class {
 	unsigned long allocated_rate;	/* allocated rate to children */
 	u64 clock;		/* class local byte clock */
 	unsigned long tail, tail1;	/* rate division tail */
-	s64 shift;		/* clock shift */
 
 	void *tcphash;		/* tcp "tracking" hash */
 #ifdef TTL
@@ -923,12 +922,10 @@ static inline void estimate_class_rate(struct est_data *e, u64 cnt,
 				       struct psp_sched_data *q,
 				       unsigned long ewma)
 {
-	if (q->phaze_idle) {
+	if (q->phaze_idle)
 		reset_est(e, q->clock, cnt);
-	} else {
+	else
 		calc_rate(e, q->clock, cnt, q->max_rate, ewma);
-
-	}
 }
 
 static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
@@ -968,23 +965,25 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 #endif
 			    cl->tail = 0;
 		}
+		if (t == 0)
+			goto gap0;
 #ifdef CONFIG_NET_SCH_PSP_EST
-		estimate_class_rate(&cl->bps, cl->phaze_bytes +=
-				    t, q, cl->ewma * npkt[d]);
+		estimate_class_rate(&cl->bps, cl->phaze_bytes, q,
+				    cl->ewma * npkt[d]);
+		cl->phaze_bytes += t;
 		cl->qdisc->rate_est.bps = cl->bps.av;
 #endif
 		if (cl->autorate) {
 #ifndef CONFIG_NET_SCH_PSP_EST
-			estimate_class_rate(&cl->bps, cl->phaze_bytes +=
-					    t, q, cl->ewma * npkt[d]);
+			estimate_class_rate(&cl->bps, cl->phaze_bytes, q,
+					    cl->ewma * npkt[d]);
+			cl->phaze_bytes += t;
 #endif
 			cl->rate = min_t(unsigned long, q->max_rate,
 					 cl->bps.av <
 					 MIN_TARGET_RATE ? 0 : cl->bps.av);
 		}
-		if (!t)
-			goto gap0;
-		if (!cl->rate)
+		if (cl->rate == 0)
 			goto normal;
 #define MUL_DIV_ROUND(res,x,y,z,tail) res=(x)*(y)+tail; tail=do_div(res,(z));
 #define MUL_DIV_ROUND_UP(res,x,y,z,tail) res=(x)*(y)+(z)-1-tail; tail=((z)-do_div(res,(z)))%(z);
@@ -1005,8 +1004,6 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			t = t * q->max_rate + cl->rate - 1;
 			do_div(t, cl->rate);
 #endif
-			if ((cl->shift = clock[d] - cl->clock) < 0)
-				cl->shift = 0;
 			clock[d] = clock[d + 1] = cl->clock += (cl->t = t);
 			break;
 		case TC_PSP_MODE_STATIC_RATE:
@@ -1106,7 +1103,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 	struct psp_class *cl, *next = NULL;
 	s64 d, nextdiff, cdiff, nextcdiff;
 	struct sk_buff *skb;
-	clock_delta tt[3], tt0[2], t;
+	clock_delta tt[3], t;
 	unsigned long len[2];
 	unsigned int npkt[2];
 	struct psp_class *cl2, *cl1;
@@ -1114,7 +1111,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 	/* signed diff still correct around clock overflow... */
 	list_for_each_entry(cl, list, plist) {
 		if (!(cl->state & FLAG_ACTIVE)) {
-			cdiff = (s64) (cl->clock - q->clock) + cl->shift;
+			cdiff = cl->clock - q->clock;
 			if (cdiff <= 0) {
 				cl->state |= FLAG_DMARK;
 				cl->clock = q->clock;	/* ...but not too far */
@@ -1124,9 +1121,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 				continue;
 			d = cdiff;
 			for (cl1 = cl->parent; cl1; cl1 = cl1->parent)
-				d = max_t(s64, d,
-					  (s64) (cl1->clock - q->clock) +
-					  cl1->shift);
+				d = max_t(s64, d, cl1->clock - q->clock);
 		} else if ((!cl->level)
 			   /* packet alredy prefetched... */
 			   && ((skb = cl->skb)
@@ -1145,32 +1140,30 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 			tt[0] = tt[1] = (len[0] = skb->len) + HW_GAP(q) + FCS;
 			len[1] = SKB_BACKSIZE(skb);
 			npkt[1] = DIV_ROUND_UP(len[1], q->mtu);
-			cdiff = (s64) (cl1->clock - q->clock) -
-			    (cl1->rate ? tt[0] : 0) + cl1->shift;
+			cdiff = (s64) (cl1->clock - q->clock) - tt[0];
+			/* not counted (backrate) pkt: push */
+			if (cdiff > 0 && len[cl1->direction] == 0)
+				cdiff = 0;
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
 			d = max_t(s64, cdiff, psp_tstamp(skb) - q->clock);
 #else
 			d = cdiff;
 #endif
-			/* correction for normal class = parent's correction */
-			tt0[0] = tt0[1] = 0;
 			while ((cl2 = cl1->prev)) {
-				if (cl1->t) {
-					t = cl1->rate ?
-					    mul_div(len[cl1->direction] +
+				if (cl1->t && cl1->rate) {
+					t = mul_div(len[cl1->direction] +
 						    npkt[cl1->direction] *
 						    cl1->hw_gap, q->max_rate,
-						    cl1->rate) : 0;
+						    cl1->rate);
 					tt[cl1->direction] += t;
 					tt[cl1->direction + 1] += t;
 				}
 				cl1 = cl2;
-				if (cl2->rate) {
-					tt0[0] = tt[0];
-					tt0[1] = tt[1];
-				}
 				cdiff = (s64) (cl2->clock - q->clock) -
-				    tt0[cl2->direction] + cl2->shift;
+				    tt[cl2->direction];
+				/* not counted (backrate) pkt: push */
+				if (cdiff > 0 && len[cl2->direction] == 0)
+					cdiff = 0;
 				if (cdiff > d)
 					d = cdiff;
 			}
