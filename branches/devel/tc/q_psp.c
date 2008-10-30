@@ -63,7 +63,7 @@ static void explain(void)
 " back     back-direction psp device and classid (for ESTIMATED_INTERACTIVE)\n"
 " rrr      minor id of master class for retransmission-round-robin\n"
 " weight   class weight for retransmission-round-robin\n"
-" ewma     rate estimator EWMA time, bytes (per QDISC rate)\n",
+" ewma     rate estimator EWMA time, bytes (per QDISC rate)\n"
 " mtu      class MTU (for backrate, xDSL/ATM, ...)\n",
 	TC_PSP_MODE_NORMAL, TC_PSP_MODE_STATIC, TC_PSP_MODE_STATIC_RATE,
 	TC_PSP_MODE_ESTIMATED, TC_PSP_MODE_ESTIMATED_GAP, TC_PSP_MODE_ESTIMATED_DATA, TC_PSP_MODE_ESTIMATED_GAP_DATA,
