@@ -48,6 +48,7 @@ struct tc_psp_copt {
 	__u32 weight;		/* class weight for RRR */
 	__u32 rrr;		/* master class index */
 	__u32 ewma;		/* rate estimator EWMA */
+	__u32 mtu;		/* class MTU (backrate, xDSL/ATM...) */
 };
 
 struct tc_psp_qopt {

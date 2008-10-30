@@ -64,6 +64,7 @@ static void explain(void)
 " rrr      minor id of master class for retransmission-round-robin\n"
 " weight   class weight for retransmission-round-robin\n"
 " ewma     rate estimator EWMA time, bytes (per QDISC rate)\n",
+" mtu      class MTU (for backrate, xDSL/ATM, ...)\n",
 	TC_PSP_MODE_NORMAL, TC_PSP_MODE_STATIC, TC_PSP_MODE_STATIC_RATE,
 	TC_PSP_MODE_ESTIMATED, TC_PSP_MODE_ESTIMATED_GAP, TC_PSP_MODE_ESTIMATED_DATA, TC_PSP_MODE_ESTIMATED_GAP_DATA,
 	TC_PSP_MODE_ESTIMATED_INTERACTIVE,
@@ -262,6 +263,12 @@ static int psp_parse_class_opt(struct qdisc_util *qu, int argc, char **argv,
 			NEXT_ARG();
 			if (get_u32(&copt.hw_gap, *argv, 10)) {
 				explain1("hw");
+				return -1;
+			}
+		} else if (matches(*argv, "mtu") == 0) {
+			NEXT_ARG();
+			if (get_u32(&copt.mtu, *argv, 10)) {
+				explain1("mtu");
 				return -1;
 			}
 		} else if (matches(*argv, "back") == 0) {
