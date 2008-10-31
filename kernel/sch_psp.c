@@ -528,6 +528,177 @@ static inline void bind_default(struct Qdisc *sch)
 	q->defclass = cl;
 }
 
+#ifdef CONFIG_NET_SCH_PSP_FAST_SORT
+
+#if HINT_BITS == 4
+/* no sense with "-funroll-loops", but I help you too (; */
+#define HINT(s,i) ((s)->clock >> (((i) + 1) << 2))
+#else
+#define HINT(s,i) ((s)->clock >> (HINT_BITS * ((i) + 1)))
+#endif
+
+static inline void hints_init(struct sk_buff *skb)
+{
+	struct psp_skb_cb *s = (struct psp_skb_cb *)&skb->cb;
+#if 0
+	int i;
+
+	for (i = NHINTS - 1; i >= 0; i--)
+		INIT_LIST_HEAD(&s->hint[i]);
+#else
+	s->hint[0].prev = NULL;
+#endif
+}
+
+static inline void hints_delete(struct sk_buff *skb)
+{
+	struct psp_skb_cb *s = (struct psp_skb_cb *)&skb->cb;
+	int i;
+
+	if (s->hint[0].prev) {
+		for (i = NHINTS - 1; i >= 0; i--)
+			list_del(&s->hint[i]);
+		s->hint[0].prev = NULL;
+	}
+}
+
+static inline void __skb_queue_tstamp(struct sk_buff_head *list,
+				      struct sk_buff *newsk)
+{
+	struct sk_buff *prev = list->prev;
+	struct psp_skb_cb *s = (struct psp_skb_cb *)&newsk->cb;
+	struct psp_skb_cb *slast, *s1;
+	int i;
+	u64 h, h1;
+
+	if (prev == (struct sk_buff *)list) {
+		for (i = NHINTS - 1; i >= 0; i--)
+			INIT_LIST_HEAD(&s->hint[i]);
+		goto queue;
+	}
+	s1 = slast = (struct psp_skb_cb *)&prev->cb;
+	for (i = NHINTS - 1; i >= 0; i--) {
+		/* s - new packet cb, s1 - found hint/packet cb */
+		h = HINT(s, i);
+	      next_hint:
+		h1 = HINT(s1, i);
+		if (h1 > h) {
+			/* look next */
+			s1 = container_of(s1->hint[i].next, struct psp_skb_cb,
+					  hint[i]);
+			if (s1 != slast)
+				goto next_hint;
+			/* end/start of list, we are the new hint */
+			list_add_tail(&s->hint[i], &s1->hint[i]);
+			s1 = container_of(s->hint[i].prev, struct psp_skb_cb,
+					  hint[i]);
+		} else if (h1 < h) {
+			list_add_tail(&s->hint[i], &s1->hint[i]);
+			if (s1 != slast)
+				s1 = container_of(s->hint[i].prev,
+						  struct psp_skb_cb, hint[i]);
+		} else if (s->clock >= s1->clock && !list_empty(&s1->hint[i])) {
+			list_replace_init(&s1->hint[i], &s->hint[i]);
+			if (s1 != slast)
+				s1 = container_of(s->hint[i].prev,
+						  struct psp_skb_cb, hint[i]);
+		} else
+			INIT_LIST_HEAD(&s->hint[i]);
+	}
+
+	for (prev = container_of((void *)s1, struct sk_buff, cb);
+	     prev != (struct sk_buff *)list
+	     && psp_tstamp(prev) > s->clock; prev = prev->prev)
+		/* nothing */ ;
+      queue:
+	__skb_queue_after(list, prev, newsk);
+}
+
+/* something wrong? */
+static inline struct sk_buff_head *fifo_requeue_tail(struct sk_buff *skb)
+{				/* must be tail */
+	struct sk_buff_head *list = (struct sk_buff_head *)skb->next;
+	struct sk_buff *prev = skb->prev;
+	struct psp_skb_cb *s = (struct psp_skb_cb *)&skb->cb;
+	struct psp_skb_cb *slast, *s1;
+	int i;
+	u64 h, h1;
+
+	if (list == (struct sk_buff_head *)skb || !list)
+		return NULL;
+	if (list == (struct sk_buff_head *)prev) {
+		for (i = NHINTS - 1; i >= 0; i--)
+			INIT_LIST_HEAD(&s->hint[i]);
+		return list;
+	}
+	slast = (struct psp_skb_cb *)&prev->cb;
+	for (i = NHINTS - 1; i >= 0; i--) {
+		/* s - new packet cb, s1 - tail (first) hint cb */
+		h = HINT(s, i);
+		s1 = container_of(slast->hint[i].prev, struct psp_skb_cb,
+				  hint[i]);
+		h = HINT(s1, i);
+		if (h1 > h)
+			list_add_tail(&s->hint[i], &slast->hint[i]);
+		else if (s1 == slast)
+			INIT_LIST_HEAD(&s->hint[i]);
+		else
+			list_replace_init(&s1->hint[i], &s->hint[i]);
+	}
+	__skb_queue_head(list, __skb_dequeue_tail(list));
+	return list;
+}
+
+static inline void hints_unlink_tail(struct sk_buff_head *list)
+{
+	/* old - old tail (to remove), new - new tail */
+	struct sk_buff *old = list->prev;
+	struct sk_buff *new = old->prev;
+	int i;
+
+	if ((struct sk_buff_head *)new != list) {
+		struct psp_skb_cb *s = (struct psp_skb_cb *)&old->cb;
+		struct psp_skb_cb *s1 = (struct psp_skb_cb *)&new->cb;
+
+		for (i = NHINTS - 1; i >= 0; i--) {
+			if (s->hint[i].next == &s1->hint[i])
+				list_del_init(&s->hint[i]);
+			else if (list_empty(&s->hint[i]))
+				INIT_LIST_HEAD(&s1->hint[i]);
+			else
+				list_replace_init(&s->hint[i], &s1->hint[i]);
+		}
+	}
+}
+
+#else
+#define hints_delete(skb) ;
+#define hints_init(skb) ;
+#define hints_unlink_tail(list) ;
+static inline void __skb_queue_tstamp(struct sk_buff_head *list,
+				      struct sk_buff *newsk)
+{
+	struct sk_buff *prev;
+
+	for (prev = ((struct sk_buff *)list)->prev;
+	     prev != (struct sk_buff *)list
+	     && psp_tstamp(prev) > psp_tstamp(newsk); prev = prev->prev)
+		/* nothing */ ;
+	__skb_queue_after(list, prev, newsk);
+}
+
+static inline struct sk_buff_head *fifo_requeue_tail(struct sk_buff *skb)
+{				/* must be tail */
+	struct sk_buff_head *list = (struct sk_buff_head *)skb->next;
+
+	if (list && list != (struct sk_buff_head *)skb) {
+		__skb_queue_head(list, __skb_dequeue_tail(list));
+		return list;
+	}
+	return NULL;
+}
+#endif
+
 #define classtrace 10
 
 static struct psp_class *psp_classify(struct sk_buff *skb, struct Qdisc *sch,
@@ -960,10 +1131,6 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			cl->state &= ~FLAG_DMARK;
 			/* reset to parent ethernet + its transfer time */
 			cl->clock = clock[d];
-#ifdef CONFIG_NET_SCH_PSP_RATESAFE
-			cl->tail1 =
-#endif
-			    cl->tail = 0;
 		}
 		if (t == 0)
 			goto gap0;
@@ -1085,6 +1252,18 @@ static inline clock_delta cut_gap(struct psp_sched_data *q, clock_delta gap)
 	/* -(HW_GAP+FCS) - later */
 }
 
+static inline struct sk_buff *psp_prefetch(struct psp_class *cl)
+{
+	struct sk_buff *skb = cl->skb = cl->qdisc->ops->dequeue(cl->qdisc);
+
+#ifdef CONFIG_NET_SCH_PSP_FAST_SORT
+	/* for prio + pfifo */
+	if (skb)
+		hints_delete(skb);
+#endif
+	return skb;
+}
+
 /* Real class clock += tt - next_tt
  * where: tt - last packet total parents' ethernet transfer time,
  *        next_tt - next packet total parents' transfer time.
@@ -1129,8 +1308,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 			       || ((skb = cl->qdisc->q.next)
 				   && skb != (void *)&cl->qdisc->q)
 			       /* or prefetch packet from unknown leaf */
-			       || (skb = cl->skb =
-				   cl->qdisc->ops->dequeue(cl->qdisc)))) {
+			       || (skb = psp_prefetch(cl)))) {
 			cl1 = NULL;
 			for (cl2 = cl; cl2; cl2 = cl2->parent) {
 				cl2->prev = cl1;
@@ -1140,7 +1318,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 			len[1] = SKB_BACKSIZE(skb);
 			cdiff = (s64) (cl1->clock - q->clock) - tt[0];
 			/* not counted (backrate) pkt: push */
-			if (cdiff > 0 && len[cl1->direction] == 0)
+			if ((t = len[cl1->direction]) == 0 && cdiff > 0)
 				cdiff = 0;
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
 			d = max_t(s64, cdiff, psp_tstamp(skb) - q->clock);
@@ -1149,7 +1327,6 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 #endif
 			while ((cl2 = cl1->prev)) {
 				if (cl1->t && cl1->rate) {
-					t = len[cl1->direction];
 					t = (t + DIV_ROUND_UP((unsigned long)t,
 							      cl1->mtu) *
 					     cl1->hw_gap) * q->max_rate;
@@ -1157,17 +1334,19 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 					tt[cl1->direction] += t;
 					tt[cl1->direction + 1] += t;
 				}
+				/* skip classes unrated for this pkt */
+				while ((t = len[cl2->direction]) == 0)
+					if ((cl2 = cl2->prev) == NULL)
+						goto cmp;
 				cl1 = cl2;
 				cdiff = (s64) (cl2->clock - q->clock) -
 				    tt[cl2->direction];
-				/* not counted (backrate) pkt: push */
-				if (cdiff > 0 && len[cl2->direction] == 0)
-					cdiff = 0;
 				if (cdiff > d)
 					d = cdiff;
 			}
 		} else		/* not leaf or exception */
 			continue;
+	      cmp:
 		if (next == NULL || nextdiff > d
 		    || (nextdiff == d && nextcdiff > cdiff)) {
 			next = cl;
@@ -1847,175 +2026,6 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #endif
 	return rrr;
 }
-
-#ifdef CONFIG_NET_SCH_PSP_FAST_SORT
-
-#if HINT_BITS == 4
-/* no sense with "-funroll-loops", but I help you too (; */
-#define HINT(s,i) ((s)->clock >> (((i) + 1) << 2))
-#else
-#define HINT(s,i) ((s)->clock >> (HINT_BITS * ((i) + 1)))
-#endif
-
-static inline void hints_init(struct sk_buff *skb)
-{
-	struct psp_skb_cb *s = (struct psp_skb_cb *)&skb->cb;
-#if 0
-	int i;
-
-	for (i = NHINTS - 1; i >= 0; i--)
-		INIT_LIST_HEAD(&s->hint[i]);
-#else
-	s->hint[0].prev = NULL;
-#endif
-}
-
-static inline void hints_delete(struct sk_buff *skb)
-{
-	struct psp_skb_cb *s = (struct psp_skb_cb *)&skb->cb;
-	int i;
-
-	if (s->hint[0].prev)
-		for (i = NHINTS - 1; i >= 0; i--)
-			list_del_init(&s->hint[i]);
-}
-
-static inline void __skb_queue_tstamp(struct sk_buff_head *list,
-				      struct sk_buff *newsk)
-{
-	struct sk_buff *prev = list->prev;
-	struct psp_skb_cb *s = (struct psp_skb_cb *)&newsk->cb;
-	struct psp_skb_cb *slast, *s1;
-	int i;
-	u64 h, h1;
-
-	if (prev == (struct sk_buff *)list) {
-		for (i = NHINTS - 1; i >= 0; i--)
-			INIT_LIST_HEAD(&s->hint[i]);
-		goto queue;
-	}
-	s1 = slast = (struct psp_skb_cb *)&prev->cb;
-	for (i = NHINTS - 1; i >= 0; i--) {
-		/* s - new packet cb, s1 - found hint/packet cb */
-		h = HINT(s, i);
-	      next_hint:
-		h1 = HINT(s1, i);
-		if (h1 > h) {
-			/* look next */
-			s1 = container_of(s1->hint[i].next, struct psp_skb_cb,
-					  hint[i]);
-			if (s1 != slast)
-				goto next_hint;
-			/* end/start of list, we are the new hint */
-			list_add_tail(&s->hint[i], &s1->hint[i]);
-			s1 = container_of(s->hint[i].prev, struct psp_skb_cb,
-					  hint[i]);
-		} else if (h1 < h) {
-			list_add_tail(&s->hint[i], &s1->hint[i]);
-			if (s1 != slast)
-				s1 = container_of(s->hint[i].prev,
-						  struct psp_skb_cb, hint[i]);
-		} else if (s->clock >= s1->clock && !list_empty(&s1->hint[i])) {
-			list_replace_init(&s1->hint[i], &s->hint[i]);
-			if (s1 != slast)
-				s1 = container_of(s->hint[i].prev,
-						  struct psp_skb_cb, hint[i]);
-		} else
-			INIT_LIST_HEAD(&s->hint[i]);
-	}
-
-	for (prev = container_of((void *)s1, struct sk_buff, cb);
-	     prev != (struct sk_buff *)list
-	     && psp_tstamp(prev) > s->clock; prev = prev->prev)
-		/* nothing */ ;
-      queue:
-	__skb_queue_after(list, prev, newsk);
-}
-
-/* something wrong? */
-static inline struct sk_buff_head *fifo_requeue_tail(struct sk_buff *skb)
-{				/* must be tail */
-	struct sk_buff_head *list = (struct sk_buff_head *)skb->next;
-	struct sk_buff *prev = skb->prev;
-	struct psp_skb_cb *s = (struct psp_skb_cb *)&skb->cb;
-	struct psp_skb_cb *slast, *s1;
-	int i;
-	u64 h, h1;
-
-	if (list == (struct sk_buff_head *)skb || !list)
-		return NULL;
-	if (list == (struct sk_buff_head *)prev) {
-		for (i = NHINTS - 1; i >= 0; i--)
-			INIT_LIST_HEAD(&s->hint[i]);
-		return list;
-	}
-	slast = (struct psp_skb_cb *)&prev->cb;
-	for (i = NHINTS - 1; i >= 0; i--) {
-		/* s - new packet cb, s1 - tail (first) hint cb */
-		h = HINT(s, i);
-		s1 = container_of(slast->hint[i].prev, struct psp_skb_cb,
-				  hint[i]);
-		h = HINT(s1, i);
-		if (h1 > h)
-			list_add_tail(&s->hint[i], &slast->hint[i]);
-		else if (s1 == slast)
-			INIT_LIST_HEAD(&s->hint[i]);
-		else
-			list_replace_init(&s1->hint[i], &s->hint[i]);
-	}
-	__skb_queue_head(list, __skb_dequeue_tail(list));
-	return list;
-}
-
-static inline void hints_unlink_tail(struct sk_buff_head *list)
-{
-	/* old - old tail (to remove), new - new tail */
-	struct sk_buff *old = list->prev;
-	struct sk_buff *new = old->prev;
-	int i;
-
-	if ((struct sk_buff_head *)new != list) {
-		struct psp_skb_cb *s = (struct psp_skb_cb *)&old->cb;
-		struct psp_skb_cb *s1 = (struct psp_skb_cb *)&new->cb;
-
-		for (i = NHINTS - 1; i >= 0; i--) {
-			if (s->hint[i].next == &s1->hint[i])
-				list_del_init(&s->hint[i]);
-			else if (list_empty(&s->hint[i]))
-				INIT_LIST_HEAD(&s1->hint[i]);
-			else
-				list_replace_init(&s->hint[i], &s1->hint[i]);
-		}
-	}
-}
-
-#else
-#define hints_delete(skb) ;
-#define hints_init(skb) ;
-#define hints_unlink_tail(list) ;
-static inline void __skb_queue_tstamp(struct sk_buff_head *list,
-				      struct sk_buff *newsk)
-{
-	struct sk_buff *prev;
-
-	for (prev = ((struct sk_buff *)list)->prev;
-	     prev != (struct sk_buff *)list
-	     && psp_tstamp(prev) > psp_tstamp(newsk); prev = prev->prev)
-		/* nothing */ ;
-	__skb_queue_after(list, prev, newsk);
-}
-
-static inline struct sk_buff_head *fifo_requeue_tail(struct sk_buff *skb)
-{				/* must be tail */
-	struct sk_buff_head *list = (struct sk_buff_head *)skb->next;
-
-	if (list && list != (struct sk_buff_head *)skb) {
-		__skb_queue_head(list, __skb_dequeue_tail(list));
-		return list;
-	}
-	return NULL;
-}
-#endif
 
 static inline struct sk_buff_head *fifo_tstamp_sort(struct sk_buff *skb)
 {				/* must be tail */
@@ -2817,7 +2827,7 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	chopt(cl->ewma, copt->ewma);
 	cl->max_rate = (cl->autorate = (copt->rate == 1)) ? 0 : copt->rate;
 	cl->hw_gap = copt->hw_gap;
-	cl->mtu = copt->mtu? : MTU(sch);
+	cl->mtu = copt->mtu ? : MTU(sch);
 #if 0
 	cl->bps.av = cl->bps.rate ? : all_rate;
 #endif
