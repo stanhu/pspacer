@@ -1869,7 +1869,6 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		if (h->ports == *(u32 *) th) {
 			if (seq == h->seq) {
 				/* same sequence */
-
 				if (TH->ack && (aseq != h->ack_seq))
 					goto next_aseq;
 				/* sequences equal or unused, comparing other tcp data */
@@ -1884,6 +1883,14 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				if (!(cl->state & TC_PSP_MODE_RETRANS_FAST))
 					goto continue_connection;
 				early = h->clock;
+				if ((!TH->ack) || (TH->fin | TH->rst) != 0
+				    || (x = q->mtu - hdr_size) == 0)
+					goto continue_connection;
+				/* ack retransmission - count backsize again */
+				SKB_BACKSIZE(skb) = be16_to_cpu(TH->window);
+				SKB_BACKSIZE(skb) +=
+				    DIV_ROUND_UP(SKB_BACKSIZE(skb), x) *
+				    hdr_size;
 				goto continue_connection;
 			}
 			if (seq > h->seq) {
@@ -1951,7 +1958,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	h->end = h->seq = seq;
 	if (TH->ack) {
 	      next_aseq:
-		if (aseq > h->ack_seq && ((TH->fin | TH->rst) == 0)
+		if (aseq > h->ack_seq && (TH->fin | TH->rst) == 0
 		    && (x = q->mtu - hdr_size)) {
 			SKB_BACKSIZE(skb) = be16_to_cpu(TH->window);
 			SKB_BACKSIZE(skb) +=
