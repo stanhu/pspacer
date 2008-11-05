@@ -44,9 +44,7 @@ all:
 	$(MAKE) -C $(KERNELPATH) SUBDIRS=$(shell pwd) modules
 
 sch_psp.o:
-ifneq ($(findstring 2.6,$(KERNELRELEASE)),)
 	$(LD) -o sch_psp.ko -r $(psp-objs)
-endif
 
 install:
 	#strip -S sch_psp.ko
