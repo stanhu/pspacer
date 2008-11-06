@@ -1874,6 +1874,16 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				/* sequences equal or unused, comparing other tcp data */
 				if (memcmp(&h->misc, th + 12, sizeof(h->misc)))
 					goto next_pkt;
+				if (TH->ack && (TH->fin | TH->rst) == 0
+				    && (x = q->mtu - hdr_size)) {
+					/* ack retransmission - count backsize half */
+					SKB_BACKSIZE(skb) =
+					    be16_to_cpu(TH->window);
+					SKB_BACKSIZE(skb) +=
+					    DIV_ROUND_UP(SKB_BACKSIZE(skb),
+							 x) * hdr_size;
+					SKB_BACKSIZE(skb) >>= 1;
+				}
 			      retrans:	/* same tcp packet - retransmission */
 #ifdef SYN_WEIGHT
 				if (res)	/* packet alredy slowed */
@@ -1883,14 +1893,6 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				if (!(cl->state & TC_PSP_MODE_RETRANS_FAST))
 					goto continue_connection;
 				early = h->clock;
-				if ((!TH->ack) || (TH->fin | TH->rst) != 0
-				    || (x = q->mtu - hdr_size) == 0)
-					goto continue_connection;
-				/* ack retransmission - count backsize again */
-				SKB_BACKSIZE(skb) = be16_to_cpu(TH->window);
-				SKB_BACKSIZE(skb) +=
-				    DIV_ROUND_UP(SKB_BACKSIZE(skb), x) *
-				    hdr_size;
 				goto continue_connection;
 			}
 			if (seq > h->seq) {
