@@ -121,17 +121,12 @@ unsigned long phy_rate = 125000000;
 u32 psp_rand = 0;
 
 #define NODEVAL 2
+typedef u64 nodeval_t[NODEVAL];
+
 #define TREE_MAX 128
 struct __node {
 	struct __node *b[2];
-#if NODEVAL == 2
-	union {
-		u64 vv;
-		u32 v[NODEVAL];
-	};
-#else
-	u32 v[NODEVAL];
-#endif
+	nodeval_t v;
 #ifdef CONFIG_NET_SCH_PSP_RRR
 	int rrr;
 #endif
@@ -143,8 +138,8 @@ struct hashitem {
 #ifdef TTL
 	struct list_head tcplist;
 #endif
-#define HASH_ZERO (4*NODEVAL+12)
-	u32 v[NODEVAL];
+#define HASH_ZERO (sizeof(nodeval_t)+12)
+	nodeval_t v;
 	u32 ack_seq;
 	u64 clock;
 #ifdef CONFIG_IPV6
@@ -1555,17 +1550,17 @@ static void tree_heap_free(struct psp_class *cl)
 }
 
 #if 1
-static inline struct __node *tree_node_alloc(struct psp_class *cl)
-{
-	struct __node *n;
-
-	if ((n = cl->tree_heap)) {
-		cl->tree_heap = n->b[0];
-		memset(n, 0, sizeof(struct __node));
-	} else
-		n = kzalloc(sizeof(struct __node), GFP_KERNEL);
-	return n;
-}
+#define tree_node_alloc(cl) ({\
+	struct __node *n;\
+\
+	if ((n = (cl)->tree_heap)) {\
+		(cl)->tree_heap = n->b[0];\
+		memset(n, 0, sizeof(struct __node));\
+	} else\
+		if(!(n = kzalloc(sizeof(struct __node), GFP_KERNEL)))\
+			goto err;\
+	n;\
+})
 
 static inline void tree_node_free(struct psp_class *cl, struct __node *n)
 {
@@ -1573,16 +1568,11 @@ static inline void tree_node_free(struct psp_class *cl, struct __node *n)
 	cl->tree_heap = n;
 }
 #else
-#define tree_node_alloc(cl) kzalloc(sizeof(struct __node), GFP_ATOMIC)
+#define tree_node_alloc(cl) kzalloc(sizeof(struct __node), GFP_KERNEL)
 #define tree_node_free(cl,n) kfree(n);
 #endif
 
-#if NODEVAL == 2
-/* speedup */
-#define node_val_copy(dst,src) (dst)->vv=(src)->vv
-#else
 #define node_val_copy(dst,src) memcpy((dst)->v,(src)->v,sizeof((dst)->v))
-#endif
 
 static inline void tree_node_fix(struct psp_class *cl, node n)
 {
@@ -1607,9 +1597,23 @@ static inline void tree_node_fix(struct psp_class *cl, node n)
 static inline void tree_node_gap(struct __node *n1, u64 clock, int *gap,
 				 int len)
 {
-	*gap = (*gap +
-		mul_div(clock - n1->clock, n1->v[1], n1->v[1] + n1->v[0] + 1)
-	    ) >> 1;
+#if BITS_PER_LONG == 64
+	*gap = (*gap + ((clock - n1->clock)*n1->v[1])/(n1->v[0] + n1->v[1] + 1)) >> 1;
+#else
+	u64 x1 = n1->v[1];
+	u64 x =n1->v[0] + x1 + 1;
+
+	/* around overflow */
+	if(x < x1)
+		return;
+	while(x > (u64)(~(u32)0)) {
+		x >>= 1;
+		x1 >>= 1;
+	}
+	x1 *= (clock - n1->clock);
+	do_div(x1, x);
+	*gap = (*gap + x1) >> 1;
+#endif
 }
 
 static inline void tree_del(struct psp_class *cl, node n, void *key, int size,
@@ -1625,7 +1629,7 @@ static inline void tree_del(struct psp_class *cl, node n, void *key, int size,
 	}
 	if ((n1 = *n)) {
 		n1->v[1] -= v1;
-		if (!(n1->v[0] -= v0))
+		if ((n1->v[0] -= v0) == 0 && n1->v[1] == 0)
 			tree_node_fix(cl, n);
 		for (i--; i >= 0; i--)
 			tree_node_fix(cl, nn[i]);
@@ -1723,16 +1727,14 @@ tree_add(struct psp_class *cl, node n, void *key1, void *key2, int size,
 	      node:
 		for (; i < size; i++) {
 			nn[i] = nx;
-			if (!((*nx) = n1 = tree_node_alloc(cl)))
-				goto err;
+			(*nx) = n1 = tree_node_alloc(cl);
 			n1->clock = clock;
 #ifdef CONFIG_NET_SCH_PSP_RRR
 			n1->rrr = rrr;
 #endif
 			nx = &n1->b[ip_bit(i, key1)];
 		}
-		if (!((*nx) = n1 = tree_node_alloc(cl)))
-			goto err;
+		(*nx) = n1 = tree_node_alloc(cl);
 		n1->clock = clock;
 #ifdef CONFIG_NET_SCH_PSP_RRR
 		n1->rrr = rrr;
