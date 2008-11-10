@@ -1607,16 +1607,9 @@ static inline void tree_node_fix(struct psp_class *cl, node n)
 static inline void tree_node_gap(struct __node *n1, u64 clock, int *gap,
 				 int len)
 {
-	long g, g1;
-#if 1
-	unsigned long x = n1->v[0] ? : 1;
-#else
-	unsigned long x = n1->v[0] + 1;
-#endif
-	g = clock - n1->clock;
-	g1 = mul_div_up(g, x + n1->v[1], x);
-	*gap = (*gap + g1 - g) >> 1;
-	/* *gap=max_t(int,*gap,g1-g); */
+	*gap = (*gap +
+		mul_div(clock - n1->clock, n1->v[1], n1->v[1] + n1->v[0] + 1)
+	    ) >> 1;
 }
 
 static inline void tree_del(struct psp_class *cl, node n, void *key, int size,
@@ -1674,13 +1667,16 @@ tree_get(node n, void *key1, void *key2, int size, int len, int *gap)
       node:
 	for (j = i - 1; j >= 0; j--)
 		tree_node_gap(*nn[j], clock, gap, len);
+	if (key2) {
+		int gap2 = 0;
+
 #ifdef CONFIG_NET_SCH_PSP_RRR
-	if (key2)
-		rrr = (rrr + tree_get(n, key2, NULL, size, len, gap)) >> 1;
+		rrr = (rrr + tree_get(n, key2, NULL, size, len, &gap2)) >> 1;
 #else
-	if (key2)
-		tree_get(n, key2, NULL, size, len, gap);
+		tree_get(n, key2, NULL, size, len, &gap2);
 #endif
+		*gap = (*gap + gap2) >> 1;
+	}
 	for (j = 0; j < i; j++)
 		(*nn[j])->clock = clock;
 	if (n1)
@@ -1754,15 +1750,18 @@ tree_add(struct psp_class *cl, node n, void *key1, void *key2, int size,
 		(*nn[j])->rrr = rrr;
 #endif
 	}
+	if (key2) {
+		int gap2 = 0;
+
 #ifdef CONFIG_NET_SCH_PSP_RRR
-	if (key2)
 		rrr =
 		    (rrr +
-		     tree_add(cl, n, key2, NULL, size, index, val, gap)) >> 1;
+		     tree_add(cl, n, key2, NULL, size, index, val, &gap2)) >> 1;
 #else
-	if (key2)
-		tree_add(cl, n, key2, NULL, size, index, val, gap);
+		tree_add(cl, n, key2, NULL, size, index, val, &gap2);
 #endif
+		*gap = (*gap + gap2) >> 1;
+	}
 	for (j = 0; j < i; j++)
 		(*nn[j])->clock = clock;
 	n1->clock = clock;
@@ -1869,19 +1868,19 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		if (h->ports == *(u32 *) th) {
 			if (seq == h->seq) {
 				/* same sequence */
-				if (TH->ack && (aseq != h->ack_seq))
+				if (TH->ack && aseq != h->ack_seq)
 					goto next_aseq;
 				/* sequences equal or unused, comparing other tcp data */
 				if (memcmp(&h->misc, th + 12, sizeof(h->misc)))
 					goto next_pkt;
 				if (TH->ack && (TH->fin | TH->rst) == 0
 				    && (x = q->mtu - hdr_size)) {
-					/* ack retransmission - count backsize half */
+					/* ack retransmission */
 					SKB_BACKSIZE(skb) =
 					    be16_to_cpu(TH->window);
 					SKB_BACKSIZE(skb) +=
-					    DIV_ROUND_UP(SKB_BACKSIZE(skb),
-							 x) * hdr_size;
+					    DIV_ROUND_UP(SKB_BACKSIZE(skb), x)
+					    * hdr_size;
 					SKB_BACKSIZE(skb) >>= 1;
 				}
 			      retrans:	/* same tcp packet - retransmission */
