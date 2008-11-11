@@ -121,12 +121,10 @@ unsigned long phy_rate = 125000000;
 u32 psp_rand = 0;
 
 #define NODEVAL 2
-typedef u64 nodeval_t[NODEVAL];
-
 #define TREE_MAX 128
 struct __node {
 	struct __node *b[2];
-	nodeval_t v;
+	u64 v[NODEVAL];
 #ifdef CONFIG_NET_SCH_PSP_RRR
 	int rrr;
 #endif
@@ -138,8 +136,8 @@ struct hashitem {
 #ifdef TTL
 	struct list_head tcplist;
 #endif
-#define HASH_ZERO (sizeof(nodeval_t)+12)
-	nodeval_t v;
+#define HASH_ZERO (4*NODEVAL+12)
+	u32 v[NODEVAL];
 	u32 ack_seq;
 	u64 clock;
 #ifdef CONFIG_IPV6
@@ -1557,7 +1555,7 @@ static void tree_heap_free(struct psp_class *cl)
 		(cl)->tree_heap = n->b[0];\
 		memset(n, 0, sizeof(struct __node));\
 	} else\
-		if(!(n = kzalloc(sizeof(struct __node), GFP_KERNEL)))\
+		if(!(n = kzalloc(sizeof(struct __node), GFP_ATOMIC)))\
 			goto err;\
 	n;\
 })
@@ -1594,30 +1592,29 @@ static inline void tree_node_fix(struct psp_class *cl, node n)
 	}
 }
 
-static inline void tree_node_gap(struct __node *n1, u64 clock, int *gap,
-				 int len)
+static inline void tree_node_gap(struct __node *n1, u64 clock, clock_delta *gap,
+				 int len, int p)
 {
-#if BITS_PER_LONG == 64
-	*gap = (*gap + ((clock - n1->clock)*n1->v[1])/(n1->v[0] + n1->v[1] + 1)) >> 1;
-#else
+/*	*gap = (*gap + ((clock - n1->clock) * n1->v[1]) / (n1->v[0] + n1->v[1] + 1)) >> 1; */
 	u64 x1 = n1->v[1];
-	u64 x =n1->v[0] + x1 + 1;
+	u64 x = n1->v[0] + x1;
 
-	/* around overflow */
-	if(x < x1)
-		return;
-	while(x > (u64)(~(u32)0)) {
+	while (x > 0xffffffffULL) {
 		x >>= 1;
 		x1 >>= 1;
+	}
+	if ((u32) x == 0) {
+		*gap >>= 1; /* will be removed after debug */
+		printk(KERN_DEBUG "ZERO: %i: %llx %llx (len=%i)\n",p, n1->v[0],n1->v[1],len);
+		return;
 	}
 	x1 *= (clock - n1->clock);
 	do_div(x1, x);
 	*gap = (*gap + x1) >> 1;
-#endif
 }
 
 static inline void tree_del(struct psp_class *cl, node n, void *key, int size,
-			    int v0, int v1)
+			    u32 v0, u32 v1)
 {
 	node nn[TREE_MAX];
 	struct __node *n1;
@@ -1636,12 +1633,77 @@ static inline void tree_del(struct psp_class *cl, node n, void *key, int size,
 	}
 }
 
+#if 1
+/* temp regression against broken RRR changes */
+static node tree_get(node n, void *key1, void *key2, int size, int len, clock_delta *gap)
+{
+    node nn[TREE_MAX],nx;
+    struct __node *n1;
+    int i=0,j;
+    u64 clock=len;
+
+    if((n1=*(nx=n))){
+        clock+=n1->clock;
+        for(;i<size && n1;i++){
+            nn[i]=nx;
+            n1=*(nx=&n1->b[ip_bit(i,key1)]);
+        }
+        if(n1) tree_node_gap(n1,clock,gap,len,1);
+    }
+    for(j=i-1;j>=0;j--) tree_node_gap(*nn[j],clock,gap,len,2);
+    if(key2) tree_get(n,key2,NULL,size,len,gap);
+    for(j=0;j<i;j++) (*nn[j])->clock=clock;
+    if(n1) n1->clock=clock;
+    return nx;
+}
+
+static node tree_add(struct psp_class *cl, node n, void *key1, void *key2, int size, int index, int val, clock_delta *gap)
+{
+    node nn[TREE_MAX],nx;
+    struct __node *n1;
+    int i=0,j;
+    u64 clock=val;
+
+    if((n1=*(nx=n))){
+        clock+=n1->clock;
+        for(;i<size && n1;i++){
+            nn[i]=nx;
+            n1=*(nx=&n1->b[ip_bit(i,key1)]);
+        }
+    }
+    if(!n1){
+        for(;i<size;i++){
+            nn[i]=nx;
+            (*nx)=n1=tree_node_alloc(cl);
+            n1->clock=clock;
+            nx=&n1->b[ip_bit(i,key1)];
+        }
+        (*nx)=n1=tree_node_alloc(cl);
+        n1->clock=clock;
+    }
+    n1->v[index]+=val;
+    tree_node_gap(n1,clock,gap,val,3);
+    for(j=i-1;j>=0;j--){
+        tree_node_fix(cl,nn[j]);
+        tree_node_gap(*nn[j],clock,gap,val,4);
+    }
+    if(key2) tree_add(cl,n,key2,NULL,size,index,val,gap);
+    for(j=0;j<i;j++) (*nn[j])->clock=clock;
+    n1->clock=clock;
+    return nx;
+err:
+    printk(KERN_ERR "psp: unable to allocate tcp tree node\n");
+    return nx;
+}
+
+#else
+
 #ifdef CONFIG_NET_SCH_PSP_RRR
 static int
 #else
 static node
 #endif
-tree_get(node n, void *key1, void *key2, int size, int len, int *gap)
+tree_get(node n, void *key1, void *key2, int size, int len, clock_delta *gap)
 {
 	node nn[TREE_MAX], nx;
 	struct __node *n1;
@@ -1663,23 +1725,23 @@ tree_get(node n, void *key1, void *key2, int size, int len, int *gap)
 				goto node;
 			}
 		}
-		tree_node_gap(n1, clock, gap, len);
+		tree_node_gap(n1, clock, gap, len, 1);
 #ifdef CONFIG_NET_SCH_PSP_RRR
 		rrr = n1->rrr;
 #endif
 	}
       node:
 	for (j = i - 1; j >= 0; j--)
-		tree_node_gap(*nn[j], clock, gap, len);
+		tree_node_gap(*nn[j], clock, gap, len, 2);
 	if (key2) {
-		int gap2 = 0;
+		clock_delta gap2 = 0;
 
 #ifdef CONFIG_NET_SCH_PSP_RRR
 		rrr = (rrr + tree_get(n, key2, NULL, size, len, &gap2)) >> 1;
 #else
 		tree_get(n, key2, NULL, size, len, &gap2);
 #endif
-		*gap = (*gap + gap2) >> 1;
+		*gap = max_t(clock_delta, *gap, gap2);
 	}
 	for (j = 0; j < i; j++)
 		(*nn[j])->clock = clock;
@@ -1698,7 +1760,7 @@ static int
 static node
 #endif
 tree_add(struct psp_class *cl, node n, void *key1, void *key2, int size,
-	 int index, int val, int *gap)
+	 int index, int val, clock_delta *gap)
 {
 	node nn[TREE_MAX], nx;
 	struct __node *n1;
@@ -1741,19 +1803,19 @@ tree_add(struct psp_class *cl, node n, void *key1, void *key2, int size,
 #endif
 	}
 	n1->v[index] += val;
-	tree_node_gap(n1, clock, gap, val);
+	tree_node_gap(n1, clock, gap, val, 3);
 #ifdef CONFIG_NET_SCH_PSP_RRR
 	rrr = n1->rrr += index;
 #endif
 	for (j = i - 1; j >= 0; j--) {
 		tree_node_fix(cl, nn[j]);
-		tree_node_gap(*nn[j], clock, gap, val);
+		tree_node_gap(*nn[j], clock, gap, val, 4);
 #ifdef CONFIG_NET_SCH_PSP_RRR
 		(*nn[j])->rrr = rrr;
 #endif
 	}
 	if (key2) {
-		int gap2 = 0;
+		clock_delta gap2 = 0;
 
 #ifdef CONFIG_NET_SCH_PSP_RRR
 		rrr =
@@ -1762,7 +1824,7 @@ tree_add(struct psp_class *cl, node n, void *key1, void *key2, int size,
 #else
 		tree_add(cl, n, key2, NULL, size, index, val, &gap2);
 #endif
-		*gap = (*gap + gap2) >> 1;
+		*gap = max_t(clock_delta, *gap, gap2);
 	}
 	for (j = 0; j < i; j++)
 		(*nn[j])->clock = clock;
@@ -1781,10 +1843,12 @@ tree_add(struct psp_class *cl, node n, void *key1, void *key2, int size,
 #endif
 }
 
+
+#endif
 static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				struct psp_sched_data *q)
 {
-	int x, asz, gap = 0, naddr = 0;
+	int x, asz, naddr = 0;
 	unsigned char *th;
 	void *addr[2] = { NULL, NULL }, *saddr;
 	struct hashitem *h;
@@ -1796,6 +1860,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	node iptree;
 	unsigned int hdr_size;
 	u32 seq, aseq;
+	clock_delta gap = 0;
+	node nn;
 
 	if (skb->protocol == __constant_htons(ETH_P_IP)) {
 		const struct iphdr *iph = ip_hdr(skb);
@@ -1939,15 +2005,16 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 			goto next_seq;
 		}
 	}
+      new_connection:
 	/* change hashed connection to new */
 	if (cl->state & TC_PSP_MODE_RETRANS_DST)
 		tree_del(cl, iptree, &h->daddr, asz << 3, h->v[0], h->v[1]);
 	if (cl->state & TC_PSP_MODE_RETRANS_SRC)
 		tree_del(cl, iptree, &h->saddr, asz << 3, h->v[0], h->v[1]);
-#if 0
-	memset(h, 0, sizeof(struct hashitem));
-#else
+#ifdef HASH_ZERO
 	memset(&h->v, 0, HASH_ZERO);
+#else
+	memset(h, 0, sizeof(struct hashitem));
 #endif
 #ifdef TTL
       clean:
@@ -1974,16 +2041,21 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	/* h->end+=(TH->syn?1:(skb->len-hdr_size))+TH->fin; *//* rfc793 */
 	h->end += skb->len - hdr_size + TH->syn + TH->fin;
       continue_connection:
+	if ((u32) (h->v[res] += len) < (u32) len)
+		goto overflow;
 #ifdef TTL
 	list_add_tail(&h->tcplist, &cl->tcplist);
 #endif
-	h->v[res] += len;
-	if (cl->state & (TC_PSP_MODE_RETRANS_SRC | TC_PSP_MODE_RETRANS_DST))
+	if (cl->state & (TC_PSP_MODE_RETRANS_SRC | TC_PSP_MODE_RETRANS_DST)) {
 #ifdef CONFIG_NET_SCH_PSP_RRR
 		rrr =
 #endif
+	nn=
 		    tree_add(cl, iptree, addr[0], addr[1], asz << 3, res, len,
 			     &gap);
+//		if((!nn) || (*nn)->v[0]<h->v[0] || (*nn)->v[1]<h->v[1])
+//			printk(KERN_DEBUG "bad add: %i:%i %llu %llu\n",res,len,(*nn)->v[0],(*nn)->v[1]);
+	}
 #ifdef CONFIG_NET_SCH_PSP_RRR
 	if (res)
 		h->rrr = rrr;
@@ -2014,16 +2086,19 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 			tree_del(cl, iptree, &h->saddr, asz << 3, h->v[0],
 				 h->v[1]);
 		__list_del(h->tcplist.prev, h->tcplist.next);
-#if 0
-		memset(h, 0, sizeof(struct hashitem));
-#else
+#ifdef HASH_ZERO
 		h->tcplist.next = NULL;
 		memset(&h->v, 0, HASH_ZERO);
+#else
+		memset(h, 0, sizeof(struct hashitem));
 #endif
 	};
 #endif
 	/* cl->phaze_bytes -= len * res; */
 	return rrr;
+      overflow:
+	h->v[res] -= len;
+	goto new_connection;
       ip:
 	if (cl->state & (TC_PSP_MODE_RETRANS_SRC | TC_PSP_MODE_RETRANS_DST))
 #ifdef CONFIG_NET_SCH_PSP_RRR
