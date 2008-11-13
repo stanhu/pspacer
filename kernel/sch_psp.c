@@ -1592,14 +1592,16 @@ static inline void tree_node_fix(struct psp_class *cl, node n)
 	}
 }
 
-#if 1
-/* to be profiled */
 static inline void tree_node_gap(struct __node *n1, u64 clock,
 				 clock_delta * gap, int len)
 {
-/*	*gap = (*gap + ((clock - n1->clock) * n1->v[1]) / (n1->v[0] + n1->v[1])) >> 1; */
+/* old: *gap = (*gap + ((clock - n1->clock) * n1->v[1]) / (n1->v[0] + 1)) >> 1; */
 	u64 x1 = n1->v[1];
+#if 1
 	u64 x = n1->v[0] + x1;
+#else
+	u64 x = n1->v[0] + 1;
+#endif
 
 	while (x > 0xffffffffULL) {
 		x >>= 1;
@@ -1616,23 +1618,6 @@ static inline void tree_node_gap(struct __node *n1, u64 clock,
 #endif
 }
 
-#else
-static inline void tree_node_gap(struct __node *n1, u64 clock,
-				 clock_delta * gap, int len)
-{
-	u64 x1 = n1->v[1];
-	u64 x = n1->v[0] + 1;
-
-	while ((x|x1) > 0xffffffffULL) {
-		x >>= 1;
-		x1 >>= 1;
-	}
-	x1 *= len;
-	do_div(x1, x);
-	*gap = max_t(clock_delta, *gap, x1);
-}
-#endif
-
 static inline void tree_del(struct psp_class *cl, node n, void *key, int size,
 			    u32 v0, u32 v1)
 {
@@ -1645,8 +1630,7 @@ static inline void tree_del(struct psp_class *cl, node n, void *key, int size,
 		n = &n1->b[ip_bit(i, key)];
 	}
 	if ((n1 = *n)) {
-		n1->v[1] -= v1;
-		if ((n1->v[0] -= v0) == 0 && n1->v[1] == 0)
+		if (((n1->v[0] -= v0) | (n1->v[1] -= v1)) == 0)
 			tree_node_fix(cl, n);
 		for (i--; i >= 0; i--)
 			tree_node_fix(cl, nn[i]);
@@ -1659,8 +1643,7 @@ static int
 #else
 static node
 #endif
-tree_get(node n, void *key1, void *key2, int size, int len,
-		     clock_delta * gap)
+tree_get(node n, void *key1, void *key2, int size, int len, clock_delta * gap)
 {
 	node nn[TREE_MAX], nx;
 	struct __node *n1;
@@ -1716,7 +1699,7 @@ static int
 static node
 #endif
 tree_add(struct psp_class *cl, node n, void *key1, void *key2,
-		     int size, int index, int val, clock_delta * gap)
+	 int size, int index, int val, clock_delta * gap)
 {
 	node nn[TREE_MAX], nx;
 	struct __node *n1;
@@ -1815,7 +1798,6 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	unsigned int hdr_size;
 	u32 seq, aseq;
 	clock_delta gap = 0;
-	node nn;
 
 	if (skb->protocol == __constant_htons(ETH_P_IP)) {
 		const struct iphdr *iph = ip_hdr(skb);
@@ -2005,11 +1987,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #ifdef CONFIG_NET_SCH_PSP_RRR
 		rrr =
 #endif
-		    nn =
 		    tree_add(cl, iptree, addr[0], addr[1], asz << 3, res, len,
 			     &gap);
-//              if((!nn) || (*nn)->v[0]<h->v[0] || (*nn)->v[1]<h->v[1])
-//                      printk(KERN_DEBUG "bad add: %i:%i %llu %llu\n",res,len,(*nn)->v[0],(*nn)->v[1]);
 	}
 #ifdef CONFIG_NET_SCH_PSP_RRR
 	if (res)
