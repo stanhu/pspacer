@@ -1783,7 +1783,7 @@ tree_add(struct psp_class *cl, node n, void *key1, void *key2,
 }
 
 static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
-				struct psp_sched_data *q)
+				struct psp_sched_data *q, int *verd)
 {
 	int x, asz, naddr = 0;
 	unsigned char *th;
@@ -1877,9 +1877,14 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				/* sequences equal or unused, comparing other tcp data */
 				if (memcmp(&h->misc, th + 12, sizeof(h->misc)))
 					goto next_pkt;
+				/* ack retransmission? */
+#if 1
+				if (TH->ack && (TH->fin | TH->rst) == 0)
+					SKB_BACKSIZE(skb) = (h->ack_seq ?
+					    aseq - h->ack_seq : len) >> 1;
+#else
 				if (TH->ack && (TH->fin | TH->rst) == 0
 				    && (x = q->mtu - hdr_size)) {
-					/* ack retransmission */
 					SKB_BACKSIZE(skb) =
 					    be16_to_cpu(TH->window);
 					SKB_BACKSIZE(skb) +=
@@ -1887,12 +1892,13 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 					    * hdr_size;
 					SKB_BACKSIZE(skb) >>= 1;
 				}
+#endif
 			      retrans:	/* same tcp packet - retransmission */
 #ifdef SYN_WEIGHT
 				if (res)	/* packet alredy slowed */
 					goto continue_connection;
 #endif
-				/* QSTATS(cl).overlimits += len; */
+				QSTATS(cl).overlimits += len;
 				res = 1;
 				if (!(cl->state & TC_PSP_MODE_RETRANS_FAST))
 					goto continue_connection;
@@ -1965,13 +1971,20 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	h->end = h->seq = seq;
 	if (TH->ack) {
 	      next_aseq:
+#if 1
+		if (aseq > h->ack_seq && (TH->fin | TH->rst) == 0) {
+			SKB_BACKSIZE(skb) = h->ack_seq ? aseq - h->ack_seq : len;
+			h->ack_seq = aseq;
+		}
+#else
 		if (aseq > h->ack_seq && (TH->fin | TH->rst) == 0
 		    && (x = q->mtu - hdr_size)) {
 			SKB_BACKSIZE(skb) = be16_to_cpu(TH->window);
 			SKB_BACKSIZE(skb) +=
 			    DIV_ROUND_UP(SKB_BACKSIZE(skb), x) * hdr_size;
+			h->ack_seq = aseq;
 		}
-		h->ack_seq = aseq;
+#endif
 	}
       next_pkt:
 	memcpy(&h->misc, th + 12, sizeof(h->misc));
@@ -2029,6 +2042,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	};
 #endif
 	/* cl->phaze_bytes -= len * res; */
+	*verd = res;
 	return rrr;
       overflow:
 	h->v[res] -= len;
@@ -2063,6 +2077,7 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl, *cl1;
 	int err, l, len[2] = { skb->len, 0 }, npkt = 1, drops = 0;
+	int retrans = 0;
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
 	struct sk_buff *skb1 = NULL;
 #endif
@@ -2097,7 +2112,7 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 #ifdef CONFIG_NET_SCH_PSP_RRR
 				int rrr =
 #endif
-				    retrans_check(skb, cl1, q);
+				    retrans_check(skb, cl1, q, &retrans);
 				len[1] = SKB_BACKSIZE(skb);
 #ifdef CONFIG_NET_SCH_PSP_RRR
 				/* change dst mac, etc - "tc pedit" */
@@ -2142,7 +2157,7 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 			}
 		}
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
-		qdisc_skb_cb(skb)->pkt_len = len[cl->direction];
+		qdisc_skb_cb(skb)->pkt_len = len[cl->direction] << retrans;
 		if ((err = qdisc_enqueue(skb, cl->qdisc)) != NET_XMIT_SUCCESS) {
 			if (net_xmit_drop_count(err))
 #else
