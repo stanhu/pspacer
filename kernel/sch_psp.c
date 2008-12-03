@@ -1877,15 +1877,17 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				/* sequences equal or unused, comparing other tcp data */
 				if (memcmp(&h->misc, th + 12, sizeof(h->misc)))
 					goto next_pkt;
+#if 0
 				/* ack retransmission? */
 				if (TH->ack && (x = q->mtu - hdr_size)) {
-					SKB_BACKSIZE(skb) = (h->ack_seq ?
-					    aseq - h->ack_seq : len);
+					SKB_BACKSIZE(skb) = h->ack_seq ?
+					    aseq - h->ack_seq : 1;
 					SKB_BACKSIZE(skb) +=
 					    DIV_ROUND_UP(SKB_BACKSIZE(skb), x)
 					    * hdr_size;
 					SKB_BACKSIZE(skb) >>= 1;
 				}
+#endif
 			      retrans:	/* same tcp packet - retransmission */
 #ifdef SYN_WEIGHT
 				if (res)	/* packet alredy slowed */
@@ -1961,17 +1963,20 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	h->asize = asz;
 #endif
       next_seq:
-	h->end = h->seq = seq;
+	h->end = seq;
 	if (TH->ack) {
 	      next_aseq:
-		if (aseq > h->ack_seq && (x = q->mtu - hdr_size)) {
+		if (aseq > h->ack_seq &&
+		    seq - h->seq < 2 &&
+		    (x = q->mtu - hdr_size)) {
 			/* unknown overhead */
-			SKB_BACKSIZE(skb) = h->ack_seq ? aseq - h->ack_seq : len;
+			SKB_BACKSIZE(skb) = h->ack_seq ? aseq - h->ack_seq : 1;
 			SKB_BACKSIZE(skb) +=
 			    DIV_ROUND_UP(SKB_BACKSIZE(skb), x) * hdr_size;
-			h->ack_seq = aseq;
 		}
+		h->ack_seq = aseq;
 	}
+	h->seq = seq;
       next_pkt:
 	memcpy(&h->misc, th + 12, sizeof(h->misc));
 	/* h->end+=(TH->syn?1:(skb->len-hdr_size))+TH->fin; *//* rfc793 */
