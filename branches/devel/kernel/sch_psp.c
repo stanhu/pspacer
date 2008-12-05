@@ -1785,7 +1785,8 @@ tree_add(struct psp_class *cl, node n, void *key1, void *key2,
 static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				struct psp_sched_data *q, int *verd)
 {
-	int x, asz, naddr = 0;
+	int asz, naddr = 0;
+	u32 x;
 	unsigned char *th;
 	void *addr[2] = { NULL, NULL }, *saddr;
 	struct hashitem *h;
@@ -1956,8 +1957,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 			if ((TH->fin | TH->rst) == 0) {
 				/* unknown overhead */
 				x = h->ack_seq ? aseq - h->ack_seq : 1;
-				if (x < 65536)
-					SKB_BACKSIZE(skb) = x;
+				SKB_BACKSIZE(skb) = x < 65536 ? x : 0;
 				if ((x = q->mtu - hdr_size))
 					SKB_BACKSIZE(skb) += DIV_ROUND_UP(SKB_BACKSIZE(skb), x) * hdr_size;
 			}
