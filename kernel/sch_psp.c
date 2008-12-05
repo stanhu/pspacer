@@ -1872,8 +1872,13 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		if (h->ports == *(u32 *) th) {
 			if (seq == h->seq) {
 				/* same sequence */
-				if (TH->ack && aseq != h->ack_seq)
-					goto next_aseq;
+				if (TH->ack) {
+					if (aseq > h->ack_seq)
+						goto next_aseq;
+					/* old ack retransmission? */
+					if (aseq < h->ack_seq)
+						goto continue_connection;
+				}
 				/* sequences equal or unused, comparing other tcp data */
 				if (memcmp(&h->misc, th + 12, sizeof(h->misc)))
 					goto next_pkt;
@@ -1895,9 +1900,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #endif
 				QSTATS(cl).overlimits += len;
 				res = 1;
-				if (!(cl->state & TC_PSP_MODE_RETRANS_FAST))
-					goto continue_connection;
-				early = h->clock;
+				if ((cl->state & TC_PSP_MODE_RETRANS_FAST))
+					early = h->clock;
 				goto continue_connection;
 			}
 			if (seq > h->seq) {
@@ -1906,10 +1910,12 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				if (res)
 					goto next_seq;	/* packet alredy slowed */
 #endif
-				if (seq == h->end)
+				if (seq == h->end) {
 					/* speedup first packet of sequence */
+					if (TH->ack && aseq > h->ack_seq)
+						goto next_aseq_tcp_fast;
 					goto tcp_fast;
-				else if (seq < h->end) {
+				} else if (seq < h->end) {
 					/* too many data in sequence */
 					if ((h->end - h->seq) >> 1 <=
 					    (h->end - seq))
@@ -1937,10 +1943,22 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		      tcp_fast_retrans:
 			res = 1;
 		      tcp_fast:
-			if (!(cl->state & TC_PSP_MODE_RETRANS_FAST))
-				goto next_seq;
-			early = h->clock;
+			if ((cl->state & TC_PSP_MODE_RETRANS_FAST))
+				early = h->clock;
 			goto next_seq;
+		      next_aseq_tcp_fast:
+			if ((cl->state & TC_PSP_MODE_RETRANS_FAST))
+				early = h->clock;
+			h->end = h->seq = seq;
+		      next_aseq:
+		        /* safe new ack sequence */
+			if ((TH->fin | TH->rst) == 0 && (x = q->mtu - hdr_size)) {
+				/* unknown overhead */
+				SKB_BACKSIZE(skb) = h->ack_seq ? aseq - h->ack_seq : 1;
+				SKB_BACKSIZE(skb) += DIV_ROUND_UP(SKB_BACKSIZE(skb), x) * hdr_size;
+			}
+			h->ack_seq = aseq;
+			goto next_pkt;
 		}
 	}
       new_connection:
@@ -1962,21 +1980,13 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #ifdef CONFIG_IPV6
 	h->asize = asz;
 #endif
-      next_seq:
-	h->end = seq;
 	if (TH->ack) {
-	      next_aseq:
-		if (aseq > h->ack_seq &&
-		    seq - h->seq < 2 &&
-		    (x = q->mtu - hdr_size)) {
-			/* unknown overhead */
-			SKB_BACKSIZE(skb) = h->ack_seq ? aseq - h->ack_seq : 1;
-			SKB_BACKSIZE(skb) +=
-			    DIV_ROUND_UP(SKB_BACKSIZE(skb), x) * hdr_size;
-		}
 		h->ack_seq = aseq;
+		if ((TH->fin | TH->rst) == 0)
+			SKB_BACKSIZE(skb) = hdr_size;
 	}
-	h->seq = seq;
+      next_seq:
+	h->end = h->seq = seq;
       next_pkt:
 	memcpy(&h->misc, th + 12, sizeof(h->misc));
 	/* h->end+=(TH->syn?1:(skb->len-hdr_size))+TH->fin; *//* rfc793 */
