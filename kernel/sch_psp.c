@@ -1840,8 +1840,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #endif
 		return -1;
 	hdr_size = th - skb->data + (TH->doff << 2);
-	seq = be32_to_cpu(TH->seq);
-	aseq = be32_to_cpu(TH->ack_seq);
+	seq = ntohl(TH->seq);
+	aseq = ntohl(TH->ack_seq);
 	h = tcphash_get(cl->tcphash, tohash(x));
 #ifdef SYN_WEIGHT
 	if (TH->syn) {
@@ -1873,26 +1873,11 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		if (h->ports == *(u32 *) th) {
 			if (seq == h->seq) {
 				/* same sequence */
-				if (TH->ack) {
-					if (aseq > h->ack_seq)
-						goto next_aseq;
-					if (aseq < h->ack_seq)
-						goto continue_connection;
-				}
+				if (TH->ack && aseq != h->ack_seq)
+					goto next_aseq;
 				/* sequences equal or unused, comparing other tcp data */
 				if (memcmp(&h->misc, th + 12, sizeof(h->misc)))
 					goto next_pkt;
-#if 0
-				/* ack retransmission? */
-				if (TH->ack && (x = q->mtu - hdr_size)) {
-					SKB_BACKSIZE(skb) = h->ack_seq ?
-					    aseq - h->ack_seq : 1;
-					SKB_BACKSIZE(skb) +=
-					    DIV_ROUND_UP(SKB_BACKSIZE(skb), x)
-					    * hdr_size;
-					SKB_BACKSIZE(skb) >>= 1;
-				}
-#endif
 			      retrans:	/* same tcp packet - retransmission */
 #ifdef SYN_WEIGHT
 				if (res)	/* packet alredy slowed */
@@ -1910,15 +1895,10 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				if (res)
 					goto next_seq;	/* packet alredy slowed */
 #endif
-				if (seq == h->end) {
+				if (seq == h->end)
 					/* speedup first packet of sequence */
-					if (TH->ack) {
-						if (aseq < h->ack_seq)
-							goto continue_connection;
-						goto next_aseq_tcp_fast;
-					}
 					goto tcp_fast;
-				} else if (seq < h->end) {
+				else if (seq < h->end) {
 					/* too many data in sequence */
 					if ((h->end - h->seq) >> 1 <=
 					    (h->end - seq))
@@ -1942,28 +1922,19 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 					goto retrans;
 				/* unsure, new connection or untracked retrans */
 			}
+#ifdef STRICT_TCP
+			/* strict: ignore ack on strange packet */
+			h->end = h->seq = seq;
+			goto next_pkt;
+#else
 			goto next_seq;
+#endif
 		      tcp_fast_retrans:
 			res = 1;
 		      tcp_fast:
 			if ((cl->state & TC_PSP_MODE_RETRANS_FAST))
 				early = h->clock;
 			goto next_seq;
-		      next_aseq_tcp_fast:
-			if ((cl->state & TC_PSP_MODE_RETRANS_FAST))
-				early = h->clock;
-			h->end = h->seq = seq;
-		      next_aseq:
-		        /* safe new ack sequence */
-			if ((TH->fin | TH->rst) == 0) {
-				/* unknown overhead */
-				x = h->ack_seq ? aseq - h->ack_seq : 1;
-				SKB_BACKSIZE(skb) = x < 65536 ? x : 0;
-				if ((x = q->mtu - hdr_size))
-					SKB_BACKSIZE(skb) += DIV_ROUND_UP(SKB_BACKSIZE(skb), x) * hdr_size;
-			}
-			h->ack_seq = aseq;
-			goto next_pkt;
 		}
 	}
       new_connection:
@@ -1985,13 +1956,21 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #ifdef CONFIG_IPV6
 	h->asize = asz;
 #endif
-	if (TH->ack) {
-		h->ack_seq = aseq;
-		if ((TH->fin | TH->rst) == 0)
-			SKB_BACKSIZE(skb) = hdr_size;
-	}
       next_seq:
 	h->end = h->seq = seq;
+	if (TH->ack) {
+	  next_aseq:
+		if (aseq <= h->ack_seq)
+			goto next_pkt;
+		if ((TH->fin | TH->rst) == 0) {
+			SKB_BACKSIZE(skb) = h->ack_seq ?
+			    (x = aseq - h->ack_seq) < 65536 ? x : 0
+			    : 1;
+			if ((x = q->mtu - hdr_size))
+				SKB_BACKSIZE(skb) += DIV_ROUND_UP(SKB_BACKSIZE(skb), x) * hdr_size;
+		}
+		h->ack_seq = aseq;
+	}
       next_pkt:
 	memcpy(&h->misc, th + 12, sizeof(h->misc));
 	/* h->end+=(TH->syn?1:(skb->len-hdr_size))+TH->fin; *//* rfc793 */
