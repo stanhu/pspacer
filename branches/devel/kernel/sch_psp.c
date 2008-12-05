@@ -66,7 +66,7 @@
 #define MIN_TARGET_RATE (1000)	/* 1 KBytes/sec */
 
 /* remove next 8 lines before kernel inclusion ;) */
-//#define CONFIG_NET_SCH_PSP_PKT_GAP
+#define CONFIG_NET_SCH_PSP_PKT_GAP
 //#define CONFIG_NET_SCH_PSP_NO_SYN_FAIRNESS
 //#define CONFIG_NET_SCH_PSP_NO_TTL
 //#define CONFIG_NET_SCH_PSP_RRR
@@ -1873,7 +1873,10 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 			if (seq == h->seq) {
 				/* same sequence */
 				if (TH->ack)
-					goto next_aseq;
+					if (aseq > h->ack_seq)
+						goto next_aseq;
+					if (aseq < h->ack_seq)
+						goto continue_connection;
 				/* sequences equal or unused, comparing other tcp data */
 				if (memcmp(&h->misc, th + 12, sizeof(h->misc)))
 					goto next_pkt;
@@ -1907,8 +1910,11 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #endif
 				if (seq == h->end) {
 					/* speedup first packet of sequence */
-					if (TH->ack)
+					if (TH->ack) {
+						if (aseq < h->ack_seq)
+							goto continue_connection;
 						goto next_aseq_tcp_fast;
+					}
 					goto tcp_fast;
 				} else if (seq < h->end) {
 					/* too many data in sequence */
