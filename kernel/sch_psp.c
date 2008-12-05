@@ -66,7 +66,7 @@
 #define MIN_TARGET_RATE (1000)	/* 1 KBytes/sec */
 
 /* remove next 8 lines before kernel inclusion ;) */
-#define CONFIG_NET_SCH_PSP_PKT_GAP
+//#define CONFIG_NET_SCH_PSP_PKT_GAP
 //#define CONFIG_NET_SCH_PSP_NO_SYN_FAIRNESS
 //#define CONFIG_NET_SCH_PSP_NO_TTL
 //#define CONFIG_NET_SCH_PSP_RRR
@@ -1956,9 +1956,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 			if ((TH->fin | TH->rst) == 0) {
 				/* unknown overhead */
 				x = h->ack_seq ? aseq - h->ack_seq : 1;
-				if (x > 65535)
-					goto continue_connection;
-				SKB_BACKSIZE(skb) = x;
+				if (x < 65536)
+					SKB_BACKSIZE(skb) = x;
 				if ((x = q->mtu - hdr_size))
 					SKB_BACKSIZE(skb) += DIV_ROUND_UP(SKB_BACKSIZE(skb), x) * hdr_size;
 			}
