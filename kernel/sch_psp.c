@@ -1872,13 +1872,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		if (h->ports == *(u32 *) th) {
 			if (seq == h->seq) {
 				/* same sequence */
-				if (TH->ack) {
-					if (aseq > h->ack_seq)
-						goto next_aseq;
-					/* old ack retransmission? */
-					if (aseq < h->ack_seq)
-						goto continue_connection;
-				}
+				if (TH->ack)
+					goto next_aseq;
 				/* sequences equal or unused, comparing other tcp data */
 				if (memcmp(&h->misc, th + 12, sizeof(h->misc)))
 					goto next_pkt;
@@ -1912,7 +1907,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #endif
 				if (seq == h->end) {
 					/* speedup first packet of sequence */
-					if (TH->ack && aseq > h->ack_seq)
+					if (TH->ack)
 						goto next_aseq_tcp_fast;
 					goto tcp_fast;
 				} else if (seq < h->end) {
@@ -1952,10 +1947,14 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 			h->end = h->seq = seq;
 		      next_aseq:
 		        /* safe new ack sequence */
-			if ((TH->fin | TH->rst) == 0 && (x = q->mtu - hdr_size)) {
+			if ((TH->fin | TH->rst) == 0) {
 				/* unknown overhead */
-				SKB_BACKSIZE(skb) = h->ack_seq ? aseq - h->ack_seq : 1;
-				SKB_BACKSIZE(skb) += DIV_ROUND_UP(SKB_BACKSIZE(skb), x) * hdr_size;
+				x = h->ack_seq ? aseq - h->ack_seq : 1;
+				if (x > 65535)
+					goto continue_connection;
+				SKB_BACKSIZE(skb) = x;
+				if ((x = q->mtu - hdr_size))
+					SKB_BACKSIZE(skb) += DIV_ROUND_UP(SKB_BACKSIZE(skb), x) * hdr_size;
 			}
 			h->ack_seq = aseq;
 			goto next_pkt;
