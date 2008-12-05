@@ -1873,11 +1873,12 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		if (h->ports == *(u32 *) th) {
 			if (seq == h->seq) {
 				/* same sequence */
-				if (TH->ack)
+				if (TH->ack) {
 					if (aseq > h->ack_seq)
 						goto next_aseq;
 					if (aseq < h->ack_seq)
 						goto continue_connection;
+				}
 				/* sequences equal or unused, comparing other tcp data */
 				if (memcmp(&h->misc, th + 12, sizeof(h->misc)))
 					goto next_pkt;
