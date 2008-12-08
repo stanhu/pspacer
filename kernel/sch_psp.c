@@ -1799,6 +1799,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	unsigned int hdr_size;
 	u32 seq, aseq;
 	clock_delta gap = 0;
+	s32 s;
 
 	if (skb->protocol == __constant_htons(ETH_P_IP)) {
 		const struct iphdr *iph = ip_hdr(skb);
@@ -1889,7 +1890,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 					early = h->clock;
 				goto continue_connection;
 			}
-			if (seq > h->seq) {
+			s = seq - h->seq;
+			if (s > 0) {
 				/* new sequence */
 #ifdef SYN_WEIGHT
 				if (res)
@@ -1917,7 +1919,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				}
 			} else {
 				/* old sequence */
-				if (h->seq - seq <= h->v[0])
+				if ((-s) <= h->v[0])
 					/* trap to transferred size, retransmission */
 					goto retrans;
 				/* unsure, new connection or untracked retrans */
@@ -1960,15 +1962,15 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	h->end = h->seq = seq;
 	if (TH->ack) {
 	  next_aseq:
-		if (aseq <= h->ack_seq)
-			goto next_pkt;
-		if ((TH->fin | TH->rst) == 0) {
-			SKB_BACKSIZE(skb) = h->ack_seq ?
-			    (x = aseq - h->ack_seq) < 65536 ? x : 0
-			    : 1;
-			if ((x = q->mtu - hdr_size))
-				SKB_BACKSIZE(skb) += DIV_ROUND_UP(SKB_BACKSIZE(skb), x) * hdr_size;
-		}
+		if (h->ack_seq) {
+			s = aseq - h->ack_seq;
+			if (s <= 0)
+				goto next_pkt;
+			if (s >= 65536)
+				s = 0;
+		} else s=1;
+		if ((x = q->mtu - hdr_size))
+			SKB_BACKSIZE(skb) += s + DIV_ROUND_UP(s, x) * hdr_size;
 		h->ack_seq = aseq;
 	}
       next_pkt:
