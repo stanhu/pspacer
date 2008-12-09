@@ -1227,20 +1227,20 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 
 static inline clock_delta cut_gap(struct psp_sched_data *q, clock_delta gap)
 {
+	unsigned tmp = q->mtu + HW_GAP(q) + FCS;
 	/*
 	 * calculate the gap packet size:
 	 *     npkts = DIV_ROUND_UP(nearest, mtu + HW_GAP + FCS)
 	 *     gap = (nearest / npkts) - (HW_GAP + FCS)
 	 */
 #ifdef gap_u64
-	int tmp = q->mtu + HW_GAP(q) + FCS;
 	u64 npkts = gap + tmp - 1;
 
 	do_div(npkts, tmp);
 	do_div(gap, npkts);
 	return gap;
 #else
-	return gap / DIV_ROUND_UP(gap, q->mtu + HW_GAP(q) + FCS);
+	return gap / DIV_ROUND_UP(gap, tmp);
 #endif
 	/* -(HW_GAP+FCS) - later */
 }
@@ -1970,7 +1970,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				s = 0;
 		} else s=1;
 		if ((x = q->mtu - hdr_size))
-			SKB_BACKSIZE(skb) += s + DIV_ROUND_UP(s, x) * hdr_size;
+			SKB_BACKSIZE(skb) = s + DIV_ROUND_UP(s, x) * hdr_size;
 		h->ack_seq = aseq;
 	}
       next_pkt:
