@@ -1886,8 +1886,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #endif
 				QSTATS(cl).overlimits += len;
 				res = 1;
-				if ((cl->state & TC_PSP_MODE_RETRANS_FAST))
-					early = h->clock;
+				
+				early = h->clock;
 				goto continue_connection;
 			}
 			s = seq - h->seq;
@@ -1934,8 +1934,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		      tcp_fast_retrans:
 			res = 1;
 		      tcp_fast:
-			if ((cl->state & TC_PSP_MODE_RETRANS_FAST))
-				early = h->clock;
+			early = h->clock;
 			goto next_seq;
 		}
 	}
@@ -1972,6 +1971,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		if ((x = q->mtu - hdr_size))
 			SKB_BACKSIZE(skb) = s + DIV_ROUND_UP(s, x) * hdr_size;
 		h->ack_seq = aseq;
+		early = h->clock;
 	}
       next_pkt:
 	memcpy(&h->misc, th + 12, sizeof(h->misc));
@@ -2002,9 +2002,11 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #else
 	h->clock = skb->len + (psp_tstamp(skb) = h->clock + gap);
 #endif
-	early += psp_tstamp(skb);
-	if (early > psp_tstamp(skb))	/* overflow protection */
-		psp_tstamp(skb) = early >> 1;
+	if ((cl->state & TC_PSP_MODE_RETRANS_FAST)) {
+		early += psp_tstamp(skb);
+		if (early > psp_tstamp(skb))	/* overflow protection */
+			psp_tstamp(skb) = early >> 1;
+	}
 #ifdef TTL
 	if ((!list_empty(&cl->tcplist))
 	    && cl->clock > (h =
@@ -2096,6 +2098,7 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 			     q->clock0) + skb->len + HW_GAP(q) + FCS;
 		for (cl1 = cl; cl1; cl1 = cl1->parent) {
 			if (cl1->state & TC_PSP_MODE_RETRANS) {
+		    retrans_chk:
 #ifdef CONFIG_NET_SCH_PSP_RRR
 				int rrr =
 #endif
@@ -2117,7 +2120,6 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 						}
 				}
 #endif
-#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
 				/* prefetched skb later then this? */
 				if (cl->skb
 				    && psp_tstamp(skb) < psp_tstamp(cl->skb)) {
@@ -2139,9 +2141,16 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 					len[0] = len1[0];
 					len[1] = len1[1];
 				}
-#endif
 				break;
 			}
+		}
+		/* backrate without tracking parent: track and forget */
+		if (cl->direction && !(cl1->state & TC_PSP_MODE_RETRANS)) {
+			if (cl1 == NULL) {
+				cl1 = cl;
+				goto retrans_chk;
+			} else if (cl1 == cl)
+				cl1 = NULL;
 		}
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
 		qdisc_skb_cb(skb)->pkt_len = len[cl->direction] << retrans;
