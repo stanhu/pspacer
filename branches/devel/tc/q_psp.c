@@ -56,7 +56,7 @@ static void explain(void)
 "          +0x%x source retransmit correction\n"
 "          +0x%x fast retransmit correction (tcp only)\n"
 "          	+%x full retransmit correction\n"
-"          +0x%x tcp backrate (by window vs. length), use under retransmit mode\n"
+"          +0x%x tcp backrate (via ACK)\n"
 " rate     rate allocated to this class\n"
 " hw       mode 1: 0 or destination ethernet hardware gap: ifg+preamble+FCS\n"
 "          mode 2: 0 or destination device (router) timer HZ\n"
