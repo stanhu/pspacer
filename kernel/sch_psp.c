@@ -2085,7 +2085,7 @@ static inline struct sk_buff_head *fifo_tstamp_sort(struct sk_buff *skb)
 static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
-	struct psp_class *cl, *cl1;
+	struct psp_class *cl, *cl1, *cl2;
 	int err, l, len[2] = { skb->len, 0 }, npkt = 1, drops = 0;
 	int retrans = 0;
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
@@ -2117,7 +2117,10 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 
 		q->clock0 = (psp_tstamp(skb) =
 			     q->clock0) + skb->len + HW_GAP(q) + FCS;
+		cl2 = NULL;
 		for (cl1 = cl; cl1; cl1 = cl1->parent) {
+			if (cl1->direction)
+				cl2 = cl1;
 			if (cl1->state & TC_PSP_MODE_RETRANS) {
 		    retrans_chk:
 #ifdef CONFIG_NET_SCH_PSP_RRR
@@ -2165,10 +2168,10 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 				goto retrans_ok;
 			}
 		}
-		cl1 = cl;
 		/* backrate without tracking parent. track */
-		if (cl->direction)
+		if ((cl1 = cl2))
 			goto retrans_chk;
+		cl1 = cl;
 	      retrans_ok:
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
 		qdisc_skb_cb(skb)->pkt_len = len[cl->direction] << retrans;
