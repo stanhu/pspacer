@@ -119,6 +119,8 @@ MODULE_PARM_DESC(debug, "add the size to packet header for debugging (0|1)");
 unsigned long phy_rate = 125000000;
 
 u32 psp_rand = 0;
+void *tcphash;
+int tcphash_use = 0;
 
 #define NODEVAL 2
 #define TREE_MAX 128
@@ -1527,6 +1529,18 @@ static inline void tcphash_free(void *h)
 }
 #endif
 
+static inline void tcphash_free2(void *h)
+{
+	if (!h)
+		return;
+	if (h == tcphash) {
+		if (--tcphash_use)
+			return;
+		tcphash = NULL;
+	}
+	tcphash_free(h);
+}
+
 static void tree_free(node n)
 {
 	if (*n) {
@@ -1800,6 +1814,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	u32 seq, aseq;
 	clock_delta gap = 0;
 	s32 s;
+	void *thash;
 
 	if (skb->protocol == __constant_htons(ETH_P_IP)) {
 		const struct iphdr *iph = ip_hdr(skb);
@@ -1843,6 +1858,12 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	hdr_size = th - skb->data + (TH->doff << 2);
 	seq = ntohl(TH->seq);
 	aseq = ntohl(TH->ack_seq);
+	if (!cl->tcphash) {
+		if(!tcphash)
+			tcphash = tcphash_init();
+		cl->tcphash = tcphash;
+		tcphash_use++;
+	}
 	h = tcphash_get(cl->tcphash, tohash(x));
 #ifdef SYN_WEIGHT
 	if (TH->syn) {
@@ -2141,17 +2162,14 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 					len[0] = len1[0];
 					len[1] = len1[1];
 				}
-				break;
+				goto retrans_ok;
 			}
 		}
-		/* backrate without tracking parent: track and forget */
-		if (cl->direction && !(cl1->state & TC_PSP_MODE_RETRANS)) {
-			if (cl1 == NULL) {
-				cl1 = cl;
-				goto retrans_chk;
-			} else if (cl1 == cl)
-				cl1 = NULL;
-		}
+		cl1 = cl;
+		/* backrate without tracking parent. track */
+		if (cl->direction)
+			goto retrans_chk;
+	      retrans_ok:
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
 		qdisc_skb_cb(skb)->pkt_len = len[cl->direction] << retrans;
 		if ((err = qdisc_enqueue(skb, cl->qdisc)) != NET_XMIT_SUCCESS) {
@@ -2165,7 +2183,7 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 			goto stat;
 		}
 		hints_init(skb);
-		if (cl1) {
+		if ((cl1->state & TC_PSP_MODE_RETRANS)) {
 			struct sk_buff_head *list;
 			struct Qdisc *leaf;
 
@@ -2573,7 +2591,7 @@ static void psp_destroy_class(struct Qdisc *sch, struct psp_class *cl)
 	UNCLASS(last, NULL);
 	UNCLASS(wait, NULL);
 #endif
-	tcphash_free(cl->tcphash);
+	tcphash_free2(cl->tcphash);
 	tree_free(&cl->iptree);
 #ifdef CONFIG_IPV6
 	tree_free(&cl->ip6tree);
@@ -2912,7 +2930,7 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 		if (!cl->tcphash)
 			cl->tcphash = tcphash_init();
 	} else if (cl->tcphash) {
-		tcphash_free(cl->tcphash);
+		tcphash_free2(cl->tcphash);
 		cl->tcphash = NULL;
 		tree_free(&cl->iptree);
 #ifdef CONFIG_IPV6
