@@ -101,6 +101,7 @@
 #undef gap_u64			/* I prefer undef for 32bit and normal gaps */
 
 #define STRICT_TCP		/* safer but slower for multihomed link + variable window */
+#define USE_WINSCALE
 
 #ifdef gap_u64
 typedef u64 clock_delta;
@@ -138,11 +139,15 @@ struct hashitem {
 #ifdef TTL
 	struct list_head tcplist;
 #endif
-#define HASH_ZERO (4*NODEVAL+14)
 	u32 v[NODEVAL];
 	u32 ack_seq;
 	u64 clock;
+#ifdef USE_WINSCALE
+#define HASH_ZERO (4*NODEVAL+14)
 	u16 ws;
+#else
+#define HASH_ZERO (4*NODEVAL+12)
+#endif
 #ifdef CONFIG_IPV6
 	union {
 		struct {
@@ -1814,8 +1819,10 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	unsigned int hdr_size;
 	u32 seq, aseq;
 	clock_delta gap = 0;
-	s32 s;
+	u32 a;
+#ifdef USE_WINSCALE
 	short ws = -1;
+#endif
 
 	if (skb->protocol == __constant_htons(ETH_P_IP)) {
 		const struct iphdr *iph = ip_hdr(skb);
@@ -1867,6 +1874,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	}
 	h = tcphash_get(cl->tcphash, tohash(x));
 	if (TH->syn) {
+#ifdef USE_WINSCALE
 		/* get winscale */
 		op = th + sizeof(*TH);
 		opend = skb->data + hdr_size;
@@ -1883,6 +1891,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 			}
 			op += op[1];
 		}
+#endif
 #ifdef SYN_WEIGHT
 		/* slowdown syn */
 		res = 1;
@@ -1910,7 +1919,10 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		}
 #endif
 		if (h->ports == *(u32 *) th) {
-			if (seq == h->seq) {
+			if (!seq)
+				goto next_seq;
+			a = seq - h->seq;
+			if (a == 0) {
 				/* same sequence */
 				if (TH->ack && aseq != h->ack_seq)
 					goto next_aseq;
@@ -1928,8 +1940,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				early = h->clock;
 				goto continue_connection;
 			}
-			s = seq - h->seq;
-			if (s > 0) {
+			if (a < (1ul << 30)) {
 				/* new sequence */
 #ifdef SYN_WEIGHT
 				if (res)
@@ -1957,7 +1968,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				}
 			} else {
 				/* old sequence */
-				if ((-s) <= h->v[0])
+				a = -(s32)a;
+				if ((s32)a > 0 && a <= h->v[0])
 					/* trap to transferred size, retransmission */
 					goto retrans;
 				/* unsure, new connection or untracked retrans */
@@ -1999,15 +2011,18 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	h->end = h->seq = seq;
 	if (TH->ack) {
 	  next_aseq:
+		a = 1;
 		if (h->ack_seq) {
-			s = aseq - h->ack_seq;
-			if (s <= 0)
+			a = aseq - h->ack_seq;
+			if (a > (1ul << 30))
 				goto next_pkt;
-			if (s >> h->ws > 65536)
-				s = 0;
-		} else s=1;
+#ifdef USE_WINSCALE
+			if (a >> h->ws > 65536)
+				a = 0;
+#endif
+		};
 		if ((x = q->mtu - hdr_size))
-			SKB_BACKSIZE(skb) = s + DIV_ROUND_UP(s, x) * hdr_size;
+			SKB_BACKSIZE(skb) = a + DIV_ROUND_UP(a, x) * hdr_size;
 		h->ack_seq = aseq;
 		early = h->clock;
 	}
@@ -2015,8 +2030,10 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	memcpy(&h->misc, th + 12, sizeof(h->misc));
 	/* h->end+=(TH->syn?1:(skb->len-hdr_size))+TH->fin; *//* rfc793 */
 	h->end += skb->len - hdr_size + TH->syn + TH->fin;
+#ifdef USE_WINSCALE
 	if(ws != -1)
 		h->ws = ws;
+#endif
       continue_connection:
 	if ((u32) (h->v[res] += len) < (u32) len)
 		goto overflow;
