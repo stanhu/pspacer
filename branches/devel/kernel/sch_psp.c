@@ -138,10 +138,11 @@ struct hashitem {
 #ifdef TTL
 	struct list_head tcplist;
 #endif
-#define HASH_ZERO (4*NODEVAL+12)
+#define HASH_ZERO (4*NODEVAL+14)
 	u32 v[NODEVAL];
 	u32 ack_seq;
 	u64 clock;
+	u16 ws;
 #ifdef CONFIG_IPV6
 	union {
 		struct {
@@ -182,7 +183,6 @@ struct hashitem {
 #ifdef CONFIG_NET_SCH_PSP_RRR
 	int rrr;
 #endif
-	short ws;
 };
 
 #define HINT_BITS 5
@@ -1995,7 +1995,6 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #ifdef CONFIG_IPV6
 	h->asize = asz;
 #endif
-	h->ws = -1;
       next_seq:
 	h->end = h->seq = seq;
 	if (TH->ack) {
@@ -2004,8 +2003,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 			s = aseq - h->ack_seq;
 			if (s <= 0)
 				goto next_pkt;
-			if (s > (h->ws != -1 ? (u32)ntohs(h->window) << h->ws :
-			    65536))
+			if (s >> h->ws > 65536)
 				s = 0;
 		} else s=1;
 		if ((x = q->mtu - hdr_size))
