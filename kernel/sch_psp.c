@@ -182,6 +182,7 @@ struct hashitem {
 #ifdef CONFIG_NET_SCH_PSP_RRR
 	int rrr;
 #endif
+	short ws;
 };
 
 #define HINT_BITS 5
@@ -1801,7 +1802,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 {
 	int asz, naddr = 0;
 	u32 x;
-	unsigned char *th;
+	unsigned char *th, *op, *opend;
 	void *addr[2] = { NULL, NULL }, *saddr;
 	struct hashitem *h;
 #define TH ((struct tcphdr *)th)
@@ -1814,7 +1815,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	u32 seq, aseq;
 	clock_delta gap = 0;
 	s32 s;
-	void *thash;
+	short ws = -1;
 
 	if (skb->protocol == __constant_htons(ETH_P_IP)) {
 		const struct iphdr *iph = ip_hdr(skb);
@@ -1865,16 +1866,32 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		tcphash_use++;
 	}
 	h = tcphash_get(cl->tcphash, tohash(x));
-#ifdef SYN_WEIGHT
 	if (TH->syn) {
+		/* get winscale */
+		op = th + sizeof(*TH);
+		opend = skb->data + hdr_size;
+		while (op < opend && *op) {
+			if (*op == 1) {
+				op++;
+				continue;
+			}
+			if (op[1] == 0 || op+op[1] > opend)
+				break;
+			if (*op == 3 && op[1] == 3) {
+				ws = op[2];
+				break;
+			}
+			op += op[1];
+		}
+#ifdef SYN_WEIGHT
 		/* slowdown syn */
 		res = 1;
 		/* len<<=SYN_WEIGHT; */
 		if (h->syn && !(h->ack ^ TH->ack))
 			/* second syn */
 			len <<= SYN_WEIGHT;
-	}
 #endif
+	}
 #ifdef TTL
 	if (!h->tcplist.next)
 		goto clean;
@@ -1978,6 +1995,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #ifdef CONFIG_IPV6
 	h->asize = asz;
 #endif
+	h->ws = -1;
       next_seq:
 	h->end = h->seq = seq;
 	if (TH->ack) {
@@ -1986,7 +2004,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 			s = aseq - h->ack_seq;
 			if (s <= 0)
 				goto next_pkt;
-			if (s >= 65536)
+			if (s > (h->ws != -1 ? (u32)ntohs(h->window) << h->ws :
+			    65536))
 				s = 0;
 		} else s=1;
 		if ((x = q->mtu - hdr_size))
@@ -1998,6 +2017,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	memcpy(&h->misc, th + 12, sizeof(h->misc));
 	/* h->end+=(TH->syn?1:(skb->len-hdr_size))+TH->fin; *//* rfc793 */
 	h->end += skb->len - hdr_size + TH->syn + TH->fin;
+	if(ws != -1)
+		h->ws = ws;
       continue_connection:
 	if ((u32) (h->v[res] += len) < (u32) len)
 		goto overflow;
@@ -2312,7 +2333,9 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 	    max_t(int, gapsize,
 		  sizeof(struct gaphdr) + (HW_GAP(q) + FCS)) - (HW_GAP(q) +
 								FCS);
+#ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
       gap:
+#endif
 	skb = skb_clone(q->gap, GFP_ATOMIC);
 	if (unlikely(!skb))
 		goto noclone;
@@ -2542,7 +2565,9 @@ static void psp_destroy_chain(struct tcf_proto **fl)
 static void psp_destroy_class(struct Qdisc *sch, struct psp_class *cl)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 	struct psp_class *pos, *next;
+#endif
 
 #define UNCLASS(f,z) if(q->f == cl) q->f = z;
 	UNCLASS(defclass, PSP_DIRECT);
