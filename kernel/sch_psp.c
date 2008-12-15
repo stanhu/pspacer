@@ -1919,8 +1919,6 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		}
 #endif
 		if (h->ports == *(u32 *) th) {
-			if (!seq)
-				goto next_seq;
 			a = seq - h->seq;
 			if (a == 0) {
 				/* same sequence */
@@ -1940,6 +1938,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				early = h->clock;
 				goto continue_connection;
 			}
+			if (seq == 0 || h->seq == 0)
+				goto next_seq;
 			if (a < (1ul << 30)) {
 				/* new sequence */
 #ifdef SYN_WEIGHT
@@ -2011,7 +2011,6 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	h->end = h->seq = seq;
 	if (TH->ack) {
 	  next_aseq:
-		a = 1;
 		if (h->ack_seq) {
 			a = aseq - h->ack_seq;
 			if (a > (1ul << 30))
@@ -2020,7 +2019,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 			if (a >> h->ws > 65536)
 				a = 0;
 #endif
-		};
+		} else a = 1;
 		if ((x = q->mtu - hdr_size))
 			SKB_BACKSIZE(skb) = a + DIV_ROUND_UP(a, x) * hdr_size;
 		h->ack_seq = aseq;
