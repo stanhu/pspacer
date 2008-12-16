@@ -296,7 +296,7 @@ struct psp_class {
 	int weight, weight_sum;
 
 	clock_delta t;		/* last pkt hw transfer time */
-	struct psp_class *prev;	/* walk runtime */
+	struct list_head walk;	/* walk runtime */
 };
 
 struct psp_sched_data {
@@ -1101,121 +1101,132 @@ static inline void estimate_class_rate(struct est_data *e, u64 cnt,
 		calc_rate(e, q->clock, cnt, q->max_rate, ewma);
 }
 
+/* prepare classes for packet path direction listing
+   cl->direction == 0 : new head,
+   cl->direction == 1 : add tail
+ */
+static inline struct psp_class *list_root(struct psp_class *cl)
+{
+	struct psp_class *cl1 = cl;
+
+	INIT_LIST_HEAD(&cl->walk);
+	while ((cl1 = cl1->parent)) {
+		list_add_tail(&cl1->walk, &cl->walk);
+		if (!cl1->direction)
+			cl = cl1;
+	}
+	return cl;
+}
+
+#define CL_NEXT(cl) container_of((cl)->walk.next, struct psp_class, walk)
+
 static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 				 struct psp_class *cl)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
 	clock_delta len[2] = { skb->len, SKB_BACKSIZE(skb) };
 	u64 t, clock[3];
-	struct psp_class *cl1 = NULL;
+	struct psp_class *cl0;
 	unsigned int d, npkt;
 
 #ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 	q->last = cl;
 #endif
 
-	/* to first parent */
-	for (; cl; cl = cl->parent) {
-		cl->prev = cl1;
-		cl1 = cl;
-	}
 	clock[0] = clock[1] =
 	    /* update qdisc clock */
 	    q->clock0 = q->clock += skb->len + HW_GAP(q) + FCS;
-	/* list classes from parent to child */
-	for (cl = cl1; cl; cl = cl->prev) {
-		d = cl->direction;
-		npkt = DIV_ROUND_UP(len[d], cl->mtu);
-		t = len[d] + npkt * cl->hw_gap;
-		if ((cl->state & FLAG_DMARK)) {
-			/* reset class clock */
-			cl->state &= ~FLAG_DMARK;
-			/* reset to parent ethernet + its transfer time */
-			cl->clock = clock[d];
-		}
-		if (t == 0)
-			goto gap0;
+	if (!cl)
+		return;
+	cl = cl0 = list_root(cl);
+      next:
+	d = cl->direction;
+	npkt = DIV_ROUND_UP(len[d], cl->mtu);
+	t = len[d] + npkt * cl->hw_gap;
+	if ((cl->state & FLAG_DMARK)) {
+		/* reset class clock */
+		cl->state &= ~FLAG_DMARK;
+		/* reset to parent ethernet + its transfer time */
+		cl->clock = clock[d];
+	}
+	if (t == 0)
+		goto gap0;
 #ifdef CONFIG_NET_SCH_PSP_EST
+	estimate_class_rate(&cl->bps, cl->phaze_bytes, q, cl->ewma * npkt);
+	cl->phaze_bytes += t;
+	cl->qdisc->rate_est.bps = cl->bps.av;
+#endif
+	if (cl->autorate) {
+#ifndef CONFIG_NET_SCH_PSP_EST
 		estimate_class_rate(&cl->bps, cl->phaze_bytes, q,
 				    cl->ewma * npkt);
 		cl->phaze_bytes += t;
-		cl->qdisc->rate_est.bps = cl->bps.av;
 #endif
-		if (cl->autorate) {
-#ifndef CONFIG_NET_SCH_PSP_EST
-			estimate_class_rate(&cl->bps, cl->phaze_bytes, q,
-					    cl->ewma * npkt);
-			cl->phaze_bytes += t;
-#endif
-			cl->rate = min_t(unsigned long, q->max_rate,
-					 cl->bps.av <
-					 MIN_TARGET_RATE ? 0 : cl->bps.av);
-		}
-		if (cl->rate == 0)
-			goto normal;
+		cl->rate = min_t(unsigned long, q->max_rate,
+				 cl->bps.av < MIN_TARGET_RATE ? 0 : cl->bps.av);
+	}
+	if (cl->rate == 0)
+		goto normal;
 #define MUL_DIV_ROUND(res,x,y,z,tail) res=(x)*(y)+tail; tail=do_div(res,(z));
 #define MUL_DIV_ROUND_UP(res,x,y,z,tail) res=(x)*(y)+(z)-1-tail; tail=((z)-do_div(res,(z)))%(z);
-		switch (cl->state & MAJOR_MODE_MASK) {
-		case TC_PSP_MODE_ESTIMATED_DATA:
-			/* broken ;) */
+	switch (cl->state & MAJOR_MODE_MASK) {
+	case TC_PSP_MODE_ESTIMATED_DATA:
+		/* broken ;) */
+		MUL_DIV_ROUND_UP(t, t, q->max_rate, cl->rate, cl->tail);
+		/* t0 = t; */
+		cl->clock += t;
+		break;
+	case TC_PSP_MODE_ESTIMATED:
+	case TC_PSP_MODE_ESTIMATED_GAP:
+	case TC_PSP_MODE_STATIC:
+		/* hardware/ethernet */
+#ifdef CONFIG_NET_SCH_PSP_RATESAFE
+		MUL_DIV_ROUND(t, t, q->max_rate, cl->rate, cl->tail);
+#else
+		t = t * q->max_rate + cl->rate - 1;
+		do_div(t, cl->rate);
+#endif
+		clock[d] = clock[d + 1] = cl->clock += (cl->t = t);
+		break;
+	case TC_PSP_MODE_STATIC_RATE:
+		/* software/router/isp */
+		if (cl->hz == 0) {
+#ifdef CONFIG_NET_SCH_PSP_RATESAFE
 			MUL_DIV_ROUND_UP(t, t, q->max_rate, cl->rate, cl->tail);
-			/* t0 = t; */
-			cl->clock += t;
-			break;
-		case TC_PSP_MODE_ESTIMATED:
-		case TC_PSP_MODE_ESTIMATED_GAP:
-		case TC_PSP_MODE_STATIC:
-			/* hardware/ethernet */
-#ifdef CONFIG_NET_SCH_PSP_RATESAFE
+#else
 			MUL_DIV_ROUND(t, t, q->max_rate, cl->rate, cl->tail);
+#endif
+		} else {
+#ifdef CONFIG_NET_SCH_PSP_RATESAFE
+			MUL_DIV_ROUND_UP(t, t, cl->hz, cl->rate, cl->tail1);
+			MUL_DIV_ROUND_UP(t, t, q->max_rate, cl->hz, cl->tail);
 #else
-			t = t * q->max_rate + cl->rate - 1;
+			/* rounds up to destination timer quantum, rate down */
+			t = t * cl->hz + cl->rate - 1;
 			do_div(t, cl->rate);
+			t = t * q->max_rate + cl->hz - 1;
+			do_div(t, cl->hz);
 #endif
-			clock[d] = clock[d + 1] = cl->clock += (cl->t = t);
-			break;
-		case TC_PSP_MODE_STATIC_RATE:
-			/* software/router/isp */
-			if (cl->hz == 0) {
-#ifdef CONFIG_NET_SCH_PSP_RATESAFE
-				MUL_DIV_ROUND_UP(t, t, q->max_rate, cl->rate,
-						 cl->tail);
-#else
-				MUL_DIV_ROUND(t, t, q->max_rate, cl->rate,
-					      cl->tail);
-#endif
-			} else {
-#ifdef CONFIG_NET_SCH_PSP_RATESAFE
-				MUL_DIV_ROUND_UP(t, t, cl->hz, cl->rate,
-						 cl->tail1);
-				MUL_DIV_ROUND_UP(t, t, q->max_rate, cl->hz,
-						 cl->tail);
-#else
-				/* rounds up to destination timer quantum, rate down */
-				t = t * cl->hz + cl->rate - 1;
-				do_div(t, cl->rate);
-				t = t * q->max_rate + cl->hz - 1;
-				do_div(t, cl->hz);
-#endif
-			}
-			cl->clock += t;
-			break;
-		case TC_PSP_MODE_TEST:
-			cl->rate = cl->max_rate = cl->bps.av;
-		default:
-		      normal:
-			cl->clock = clock[d];
-			break;
 		}
-	      gap0:
-		/* moved from psp_dequeue() */
-		if (--QSTATS(cl).qlen == 0) {
-			QSTATS(cl).backlog = 0;
-			psp_deactivate(q, cl);
-		} else
-			QSTATS(cl).backlog -=
-			    min_t(unsigned long, len[d], QSTATS(cl).backlog);
+		cl->clock += t;
+		break;
+	case TC_PSP_MODE_TEST:
+		cl->rate = cl->max_rate = cl->bps.av;
+	default:
+	      normal:
+		cl->clock = clock[d];
+		break;
 	}
+      gap0:
+	/* moved from psp_dequeue() */
+	if (--QSTATS(cl).qlen == 0) {
+		QSTATS(cl).backlog = 0;
+		psp_deactivate(q, cl);
+	} else
+		QSTATS(cl).backlog -=
+		    min_t(unsigned long, len[d], QSTATS(cl).backlog);
+	if ((cl = CL_NEXT(cl)) != cl0)
+		goto next;
 }
 
 /*
@@ -1285,7 +1296,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 	struct sk_buff *skb;
 	clock_delta tt[3];
 	unsigned long len[2];
-	struct psp_class *cl2, *cl1;
+	struct psp_class *cl2, *cl1, *cl0;
 	u64 t;
 
 	/* signed diff still correct around clock overflow... */
@@ -1310,11 +1321,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 				   && skb != (void *)&cl->qdisc->q)
 			       /* or prefetch packet from unknown leaf */
 			       || (skb = psp_prefetch(cl)))) {
-			cl1 = NULL;
-			for (cl2 = cl; cl2; cl2 = cl2->parent) {
-				cl2->prev = cl1;
-				cl1 = cl2;
-			}
+			cl1 = cl0 = list_root(cl);
 			tt[0] = tt[1] = (len[0] = skb->len) + HW_GAP(q) + FCS;
 			len[1] = SKB_BACKSIZE(skb);
 			cdiff = (s64) (cl1->clock - q->clock) - tt[0];
@@ -1326,7 +1333,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 #else
 			d = cdiff;
 #endif
-			while ((cl2 = cl1->prev)) {
+			while ((cl2 = CL_NEXT(cl1)) != cl0) {
 				if (cl1->t && cl1->rate) {
 					t = (t + DIV_ROUND_UP((unsigned long)t,
 							      cl1->mtu) *
@@ -1337,7 +1344,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 				}
 				/* skip classes unrated for this pkt */
 				while ((t = len[cl2->direction]) == 0)
-					if ((cl2 = cl2->prev) == NULL)
+					if ((cl2 = CL_NEXT(cl2)) == cl0)
 						goto cmp;
 				cl1 = cl2;
 				cdiff = (s64) (cl2->clock - q->clock) -
@@ -1867,7 +1874,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	seq = ntohl(TH->seq);
 	aseq = ntohl(TH->ack_seq);
 	if (!cl->tcphash) {
-		if(!tcphash)
+		if (!tcphash)
 			tcphash = tcphash_init();
 		cl->tcphash = tcphash;
 		tcphash_use++;
@@ -1883,7 +1890,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				op++;
 				continue;
 			}
-			if (op[1] == 0 || op+op[1] > opend)
+			if (op[1] == 0 || op + op[1] > opend)
 				break;
 			if (*op == 3 && op[1] == 3) {
 				ws = op[2];
@@ -1934,7 +1941,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #endif
 				QSTATS(cl).overlimits += len;
 				res = 1;
-				
+
 				early = h->clock;
 				goto continue_connection;
 			}
@@ -1968,8 +1975,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				}
 			} else {
 				/* old sequence */
-				a = -(s32)a;
-				if ((s32)a > 0 && a <= h->v[0])
+				a = -(s32) a;
+				if ((s32) a > 0 && a <= h->v[0])
 					/* trap to transferred size, retransmission */
 					goto retrans;
 				/* unsure, new connection or untracked retrans */
@@ -2010,7 +2017,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
       next_seq:
 	h->end = h->seq = seq;
 	if (TH->ack) {
-	  next_aseq:
+	      next_aseq:
 		if (h->ack_seq) {
 			a = aseq - h->ack_seq;
 			if (a > (1ul << 30))
@@ -2019,7 +2026,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 			if (a >> h->ws > 65536)
 				a = 0;
 #endif
-		} else a = 1;
+		} else
+			a = 1;
 		if ((x = q->mtu - hdr_size))
 			SKB_BACKSIZE(skb) = a + DIV_ROUND_UP(a, x) * hdr_size;
 		h->ack_seq = aseq;
@@ -2030,7 +2038,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	/* h->end+=(TH->syn?1:(skb->len-hdr_size))+TH->fin; *//* rfc793 */
 	h->end += skb->len - hdr_size + TH->syn + TH->fin;
 #ifdef USE_WINSCALE
-	if(ws != -1)
+	if (ws != -1)
 		h->ws = ws;
 #endif
       continue_connection:
@@ -2157,7 +2165,7 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 			if (cl1->direction)
 				cl2 = cl1;
 			if (cl1->state & TC_PSP_MODE_RETRANS) {
-		    retrans_chk:
+			      retrans_chk:
 #ifdef CONFIG_NET_SCH_PSP_RRR
 				int rrr =
 #endif
