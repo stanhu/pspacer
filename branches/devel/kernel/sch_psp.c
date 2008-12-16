@@ -296,7 +296,7 @@ struct psp_class {
 	int weight, weight_sum;
 
 	clock_delta t;		/* last pkt hw transfer time */
-	struct list_head walk;	/* walk runtime */
+	struct psp_class *next;	/* walk runtime */
 };
 
 struct psp_sched_data {
@@ -1107,18 +1107,19 @@ static inline void estimate_class_rate(struct est_data *e, u64 cnt,
  */
 static inline struct psp_class *list_root(struct psp_class *cl)
 {
-	struct psp_class *cl1 = cl;
+	struct psp_class *first = cl, *last = cl;
 
-	INIT_LIST_HEAD(&cl->walk);
-	while ((cl1 = cl1->parent)) {
-		list_add_tail(&cl1->walk, &cl->walk);
-		if (!cl1->direction)
-			cl = cl1;
+	while ((cl = cl->parent)) {
+		if (cl->direction) {
+			last = last->next = cl;
+		} else {
+			cl->next = first;
+			first = cl;
+		}
 	}
-	return cl;
+	last->next = NULL;
+	return first;
 }
-
-#define CL_NEXT(cl) container_of((cl)->walk.next, struct psp_class, walk)
 
 static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 				 struct psp_class *cl)
@@ -1126,7 +1127,6 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	struct psp_sched_data *q = qdisc_priv(sch);
 	clock_delta len[2] = { skb->len, SKB_BACKSIZE(skb) };
 	u64 t, clock[3];
-	struct psp_class *cl0;
 	unsigned int d, npkt;
 
 #ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
@@ -1138,7 +1138,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	    q->clock0 = q->clock += skb->len + HW_GAP(q) + FCS;
 	if (!cl)
 		return;
-	cl = cl0 = list_root(cl);
+	cl = list_root(cl);
       next:
 	d = cl->direction;
 	npkt = DIV_ROUND_UP(len[d], cl->mtu);
@@ -1225,7 +1225,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	} else
 		QSTATS(cl).backlog -=
 		    min_t(unsigned long, len[d], QSTATS(cl).backlog);
-	if ((cl = CL_NEXT(cl)) != cl0)
+	if ((cl = cl->next))
 		goto next;
 }
 
@@ -1296,7 +1296,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 	struct sk_buff *skb;
 	clock_delta tt[3];
 	unsigned long len[2];
-	struct psp_class *cl2, *cl1, *cl0;
+	struct psp_class *cl2, *cl1;
 	u64 t;
 
 	/* signed diff still correct around clock overflow... */
@@ -1321,7 +1321,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 				   && skb != (void *)&cl->qdisc->q)
 			       /* or prefetch packet from unknown leaf */
 			       || (skb = psp_prefetch(cl)))) {
-			cl1 = cl0 = list_root(cl);
+			cl1 = list_root(cl);
 			tt[0] = tt[1] = (len[0] = skb->len) + HW_GAP(q) + FCS;
 			len[1] = SKB_BACKSIZE(skb);
 			cdiff = (s64) (cl1->clock - q->clock) - tt[0];
@@ -1333,7 +1333,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 #else
 			d = cdiff;
 #endif
-			while ((cl2 = CL_NEXT(cl1)) != cl0) {
+			while ((cl2 = cl1->next)) {
 				if (cl1->t && cl1->rate) {
 					t = (t + DIV_ROUND_UP((unsigned long)t,
 							      cl1->mtu) *
@@ -1344,7 +1344,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 				}
 				/* skip classes unrated for this pkt */
 				while ((t = len[cl2->direction]) == 0)
-					if ((cl2 = CL_NEXT(cl2)) == cl0)
+					if (!(cl2 = cl2->next))
 						goto cmp;
 				cl1 = cl2;
 				cdiff = (s64) (cl2->clock - q->clock) -
