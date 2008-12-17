@@ -139,15 +139,6 @@ struct hashitem {
 #ifdef TTL
 	struct list_head tcplist;
 #endif
-	u32 v[NODEVAL];
-	u32 ack_seq;
-	u64 clock;
-#ifdef USE_WINSCALE
-#define HASH_ZERO (4*NODEVAL+14)
-	u16 ws;
-#else
-#define HASH_ZERO (4*NODEVAL+12)
-#endif
 #ifdef CONFIG_IPV6
 	union {
 		struct {
@@ -182,6 +173,17 @@ struct hashitem {
 			__sum16 check;
 		};
 	};
+
+	u32 v[NODEVAL];
+	u32 ack_seq;
+	u64 clock;
+#ifdef USE_WINSCALE
+#define HASH_ZERO (4*NODEVAL+14)
+	u8 ws;
+#else
+#define HASH_ZERO (4*NODEVAL+12)
+#endif
+
 #ifdef CONFIG_IPV6
 	u8 asize;
 #endif
@@ -1109,14 +1111,13 @@ static inline struct psp_class *list_root(struct psp_class *cl)
 {
 	struct psp_class *first = cl, *last = cl;
 
-	while ((cl = cl->parent)) {
-		if (cl->direction) {
+	while ((cl = cl->parent))
+		if (cl->direction)
 			last = last->next = cl;
-		} else {
+		else {
 			cl->next = first;
 			first = cl;
 		}
-	}
 	last->next = NULL;
 	return first;
 }
@@ -2018,20 +2019,21 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	h->end = h->seq = seq;
 	if (TH->ack) {
 	      next_aseq:
-		if (h->ack_seq) {
+		a = 1;
+		if (h->ack_seq && aseq) {
 			a = aseq - h->ack_seq;
-			if (a > (1ul << 30))
-				goto next_pkt;
+			if (a > 1ul << 30
 #ifdef USE_WINSCALE
-			if (a >> h->ws > 65536)
-				a = 0;
+			    || a >> h->ws > 65536
 #endif
-		} else
-			a = 1;
+			    )
+				goto set_aseq;
+		}
 		if ((x = q->mtu - hdr_size))
 			SKB_BACKSIZE(skb) = a + DIV_ROUND_UP(a, x) * hdr_size;
-		h->ack_seq = aseq;
 		early = h->clock;
+	      set_aseq:
+		h->ack_seq = aseq;
 	}
       next_pkt:
 	memcpy(&h->misc, th + 12, sizeof(h->misc));
