@@ -335,7 +335,7 @@ struct psp_sched_data {
 #ifdef TTL
 	u32 ttl;
 #endif
-#define MTU(sch) (qdisc_dev(sch)->mtu+qdisc_dev(sch)->hard_header_len)
+#define MTU(sch) psched_mtu(qdisc_dev((sch)))
 	u64 clock;		/* wall clock */
 	u64 clock0;
 
@@ -1150,6 +1150,8 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		/* reset to parent ethernet + its transfer time */
 		cl->clock = clock[d];
 	}
+	if (QSTATS(cl).backlog == 0)	/* reset too (for backrate) */
+		goto normal;
 	if (t == 0)
 		goto gap0;
 #ifdef CONFIG_NET_SCH_PSP_EST
@@ -1220,12 +1222,11 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	}
       gap0:
 	/* moved from psp_dequeue() */
+	QSTATS(cl).backlog -= len[d];
 	if (--QSTATS(cl).qlen == 0) {
-		QSTATS(cl).backlog = 0;
+		QSTATS(cl).backlog = 0;	/* around the dead bug */
 		psp_deactivate(q, cl);
-	} else
-		QSTATS(cl).backlog -=
-		    min_t(unsigned long, len[d], QSTATS(cl).backlog);
+	}
 	if ((cl = cl->next))
 		goto next;
 }
@@ -1460,26 +1461,24 @@ static inline int tohash(u32 x)
 }
 
 #if 0
-typedef struct hashitem tcphash[HSIZE];
+/* fastest, but may be arch dependend */
+typedef struct hashitem tcphash_t[HSIZE];
 
-static inline struct hashitem *tcphash_get(void *h, unsigned long key)
-{
-	return &(*((tcphash *) h))[key];
-}
+#define tcphash_get(h, key) (&(*((tcphash_t *) (h)))[(key)])
 
 static inline void *tcphash_init(void)
 {
-	tcphash *h = kzalloc(sizeof(*h), GFP_KERNEL);
+	return (void *)__get_free_pages(GFP_KERNEL | __GFP_REPEAT | __GFP_ZERO,
+					get_order(sizeof(tcphash_t)));
 
-	return h;
 }
 
 static inline void tcphash_free(void *h)
 {
-	kfree(h);
+	free_pages((unsigned long)h, get_order(sizeof(tcphash_t)));
 }
 #else
-/* splitting array to 4K pages */
+/* splitting array to 4K pages, using constants and unrollable loops, fast */
 #define HBITS_ 4
 #define HSIZE_ (1<<HBITS_)
 #define HBITS__ (HBITS-((HBITS/HBITS_-(HBITS%HBITS_==0))*HBITS_))
@@ -2133,9 +2132,7 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 	struct psp_class *cl, *cl1, *cl2;
 	int err, l, len[2] = { skb->len, 0 }, npkt = 1, drops = 0;
 	int retrans = 0;
-#ifdef CONFIG_NET_SCH_PSP_PKT_GAP
 	struct sk_buff *skb1 = NULL;
-#endif
 
 	if (q->clock0 == q->clock)
 		q->phaze_idle = !sch->q.qlen;
@@ -2198,7 +2195,7 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 					};
 
 					for (cl2 = cl; cl2; cl2 = cl2->parent) {
-						l = cl->direction;
+						l = cl2->direction;
 						l = len[l] - len1[l];
 						BSTATS(cl2).bytes += l;
 						QSTATS(cl2).backlog += l;
