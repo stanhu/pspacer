@@ -1150,8 +1150,10 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		/* reset to parent ethernet + its transfer time */
 		cl->clock = clock[d];
 	}
-	if (QSTATS(cl).backlog == 0)	/* reset too (for backrate) */
+	if (QSTATS(cl).backlog == 0) {	/* reset too (for backrate) */
+		cl->state |= FLAG_DMARK;
 		goto normal;
+	}
 	if (t == 0)
 		goto gap0;
 #ifdef CONFIG_NET_SCH_PSP_EST
@@ -2021,7 +2023,8 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		a = 1;
 		if (h->ack_seq && aseq) {
 			a = aseq - h->ack_seq;
-			if (a > 1ul << 30
+			if (a > 1ul << 30 /* rfc */
+			    || a > q->max_rate >> 3 /* empiric */
 #ifdef USE_WINSCALE
 			    || a >> h->ws > 65536
 #endif
