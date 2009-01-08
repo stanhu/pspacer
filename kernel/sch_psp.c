@@ -103,6 +103,8 @@
 #define STRICT_TCP		/* safer but slower for multihomed link + variable window */
 #define USE_WINSCALE
 
+#define MAX_WIN(q,cl) ((q)->max_rate >> 3)  /* empiric timeout */
+
 #ifdef gap_u64
 typedef u64 clock_delta;
 #else
@@ -1142,20 +1144,22 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	cl = list_root(cl);
       next:
 	d = cl->direction;
-	npkt = DIV_ROUND_UP(len[d], cl->mtu);
-	t = len[d] + npkt * cl->hw_gap;
+	if (QSTATS(cl).backlog == 0) {
+		/* reset too (for backrate) */
+		cl->state |= FLAG_DMARK;
+		goto normal;
+	}
 	if ((cl->state & FLAG_DMARK)) {
 		/* reset class clock */
 		cl->state &= ~FLAG_DMARK;
 		/* reset to parent ethernet + its transfer time */
 		cl->clock = clock[d];
 	}
-	if (QSTATS(cl).backlog == 0) {	/* reset too (for backrate) */
-		cl->state |= FLAG_DMARK;
-		goto normal;
-	}
+	t = len[d];
 	if (t == 0)
 		goto gap0;
+	npkt = DIV_ROUND_UP(len[d], cl->mtu);
+	t += npkt * cl->hw_gap;
 #ifdef CONFIG_NET_SCH_PSP_EST
 	estimate_class_rate(&cl->bps, cl->phaze_bytes, q, cl->ewma * npkt);
 	cl->phaze_bytes += t;
@@ -1223,6 +1227,11 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		break;
 	}
       gap0:
+#ifdef MAX_WIN
+	/* may be good */
+	if ((s64)((t = clock[d] - MAX_WIN(q,cl)) - cl->clock) > 0)
+		cl->clock = t;
+#endif
 	/* moved from psp_dequeue() */
 	QSTATS(cl).backlog -= len[d];
 	if (--QSTATS(cl).qlen == 0) {
@@ -2024,7 +2033,9 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		if (h->ack_seq && aseq) {
 			a = aseq - h->ack_seq;
 			if (a > 1ul << 30 /* rfc */
-			    || a > q->max_rate >> 3 /* empiric */
+#ifdef MAX_WIN
+			    || a > MAX_WIN(q,cl)
+#endif
 #ifdef USE_WINSCALE
 			    || a >> h->ws > 65536
 #endif
