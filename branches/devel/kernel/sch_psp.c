@@ -103,7 +103,7 @@
 #define STRICT_TCP		/* safer but slower for multihomed link + variable window */
 #define USE_WINSCALE
 
-#define MAX_WIN(q,cl) ((q)->max_rate >> 3)  /* empiric timeout */
+#define MAX_WIN(rate) ((rate) >> 3)  /* empiric timeout */
 
 #ifdef gap_u64
 typedef u64 clock_delta;
@@ -114,6 +114,10 @@ typedef unsigned long clock_delta;
 static int debug __read_mostly;
 module_param(debug, int, 0644);
 MODULE_PARM_DESC(debug, "add the size to packet header for debugging (0|1)");
+
+#ifdef USE_WINSCALE
+void *win2ws;
+#endif
 
 /*
  * phy_rate is the maximum qdisc rate. If the kernel supports ethtool ioctl,
@@ -209,8 +213,7 @@ struct psp_skb_cb {
 #define psp_tstamp(skb) (((struct psp_skb_cb *)(&(skb)->cb))->clock)
 #define SKB_BACKSIZE(skb) (((struct psp_skb_cb *)(&(skb)->cb))->backsize)
 
-#define HBITS 16
-#define HSIZE (1ULL<<HBITS)
+#define TCP_HBITS 16
 
 struct est_data {
 	unsigned long av;
@@ -1129,14 +1132,15 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
 	clock_delta len[2] = { skb->len, SKB_BACKSIZE(skb) };
-	u64 t, clock[3];
+	u64 t, clock;
 	unsigned int d, npkt;
+	unsigned long _rate = q->max_rate;
 
 #ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 	q->last = cl;
 #endif
 
-	clock[0] = clock[1] =
+	clock =
 	    /* update qdisc clock */
 	    q->clock0 = q->clock += skb->len + HW_GAP(q) + FCS;
 	if (!cl)
@@ -1153,7 +1157,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		/* reset class clock */
 		cl->state &= ~FLAG_DMARK;
 		/* reset to parent ethernet + its transfer time */
-		cl->clock = clock[d];
+		cl->clock = clock;
 	}
 	t = len[d];
 	if (t == 0)
@@ -1176,6 +1180,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	}
 	if (cl->rate == 0)
 		goto normal;
+	_rate = cl->rate;
 #define MUL_DIV_ROUND(res,x,y,z,tail) res=(x)*(y)+tail; tail=do_div(res,(z));
 #define MUL_DIV_ROUND_UP(res,x,y,z,tail) res=(x)*(y)+(z)-1-tail; tail=((z)-do_div(res,(z)))%(z);
 	switch (cl->state & MAJOR_MODE_MASK) {
@@ -1195,7 +1200,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		t = t * q->max_rate + cl->rate - 1;
 		do_div(t, cl->rate);
 #endif
-		clock[d] = clock[d + 1] = cl->clock += (cl->t = t);
+		clock = cl->clock += (cl->t = t);
 		break;
 	case TC_PSP_MODE_STATIC_RATE:
 		/* software/router/isp */
@@ -1223,13 +1228,14 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		cl->rate = cl->max_rate = cl->bps.av;
 	default:
 	      normal:
-		cl->clock = clock[d];
+		cl->clock = clock;
 		break;
 	}
       gap0:
+      rate0:
 #ifdef MAX_WIN
 	/* may be good */
-	if ((s64)((t = clock[d] - MAX_WIN(q,cl)) - cl->clock) > 0)
+	if ((s64)((t = clock - MAX_WIN(_rate)) - cl->clock) > 0)
 		cl->clock = t;
 #endif
 	/* moved from psp_dequeue() */
@@ -1307,7 +1313,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 	struct psp_class *cl, *next = NULL;
 	s64 d, nextdiff, cdiff, nextcdiff;
 	struct sk_buff *skb;
-	clock_delta tt[3];
+	clock_delta tt;
 	unsigned long len[2];
 	struct psp_class *cl2, *cl1;
 	u64 t;
@@ -1335,9 +1341,9 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 			       /* or prefetch packet from unknown leaf */
 			       || (skb = psp_prefetch(cl)))) {
 			cl1 = list_root(cl);
-			tt[0] = tt[1] = (len[0] = skb->len) + HW_GAP(q) + FCS;
+			tt = (len[0] = skb->len) + HW_GAP(q) + FCS;
 			len[1] = SKB_BACKSIZE(skb);
-			cdiff = (s64) (cl1->clock - q->clock) - tt[0];
+			cdiff = (s64) (cl1->clock - q->clock) - tt;
 			/* not counted (backrate) pkt: push */
 			if ((t = len[cl1->direction]) == 0 && cdiff > 0)
 				cdiff = 0;
@@ -1352,16 +1358,14 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 							      cl1->mtu) *
 					     cl1->hw_gap) * q->max_rate;
 					do_div(t, cl1->rate);
-					tt[cl1->direction] += t;
-					tt[cl1->direction + 1] += t;
+					tt += t;
 				}
 				/* skip classes unrated for this pkt */
 				while ((t = len[cl2->direction]) == 0)
 					if (!(cl2 = cl2->next))
 						goto cmp;
 				cl1 = cl2;
-				cdiff = (s64) (cl2->clock - q->clock) -
-				    tt[cl2->direction];
+				cdiff = (s64) (cl2->clock - q->clock) - tt;
 				if (cdiff > d)
 					d = cdiff;
 			}
@@ -1463,94 +1467,98 @@ static void rrr_move(struct psp_class *cl, struct psp_class *master)
 #error  "Please fix <asm/byteorder.h>"
 #endif
 
-static inline int tohash(u32 x)
-{
-	int i;
-	for (i = HBITS; i < 32; i += HBITS)
-		x ^= x >> i;
-	return x & (HSIZE - 1);
-}
-
 #if 0
 /* fastest, but may be arch dependend */
-typedef struct hashitem tcphash_t[HSIZE];
-
-#define tcphash_get(h, key) (&(*((tcphash_t *) (h)))[(key)])
-
-static inline void *tcphash_init(void)
-{
-	return (void *)__get_free_pages(GFP_KERNEL | __GFP_REPEAT | __GFP_ZERO,
-					get_order(sizeof(tcphash_t)));
-
+#define _ARRAY(HNAME,HBITS,HBITS_,item) \
+typedef item HNAME##_t[(1ULL<<HBITS)];\
+static inline item *HNAME##_get(void *h, unsigned long key)\
+{\
+	return (&(*((HNAME##_t *) (h)))[(key)]);\
+}\
+static inline void *HNAME##_init(int p)\
+{\
+	return (void *)__get_free_pages(GFP_KERNEL | __GFP_REPEAT | __GFP_ZERO,\
+					get_order(sizeof(HNAME##_t)));\
+\
+}\
+static inline void HNAME##_free(void *h, int p)\
+{\
+	free_pages((unsigned long)h, get_order(sizeof(HNAME##_t)));\
+};\
+\
+static inline int u32_to_##HNAME(u32 x)\
+{\
+	int i;\
+	for (i = HBITS; i < 32; i += HBITS)\
+		x ^= x >> i;\
+	return x & ((1ULL<<HBITS) - 1);\
 }
 
-static inline void tcphash_free(void *h)
-{
-	free_pages((unsigned long)h, get_order(sizeof(tcphash_t)));
-}
 #else
 /* splitting array to 4K pages, using constants and unrollable loops, fast */
-#define HBITS_ 4
-#define HSIZE_ (1<<HBITS_)
-#define HBITS__ (HBITS-((HBITS/HBITS_-(HBITS%HBITS_==0))*HBITS_))
-#define HSIZE__ (1<<HBITS__)
-typedef void *tcphash_[HSIZE_];
-typedef struct hashitem tcphash__[HSIZE__];
-static inline struct hashitem *tcphash_get(void *h, unsigned long key)
-{
-	int i;
-
-	for (i = 0; i < (HBITS - HBITS__) / HBITS_; i++) {
-		h = (*((tcphash_ *) h))[key & (HSIZE_ - 1)];
-		key >>= HBITS_;
-	}
-	return &((*(tcphash__ *) h)[key & (HSIZE__ - 1)]);
+#define _ARRAY(HNAME,HBITS,HBITS_,item) \
+typedef void *HNAME##_[(1<<HBITS_)];\
+typedef item HNAME##__[(1<<(HBITS-((HBITS/HBITS_-(HBITS%HBITS_==0))*HBITS_)))];\
+static inline item *HNAME##_get(void *h, unsigned long key)\
+{\
+	int i;\
+\
+	for (i = 0; i < (HBITS - (HBITS-((HBITS/HBITS_-(HBITS%HBITS_==0))*HBITS_))) / HBITS_; i++) {\
+		h = (*((HNAME##_ *) h))[key & ((1<<HBITS_) - 1)];\
+		key >>= HBITS_;\
+	}\
+	return &((*(HNAME##__ *) h)[key & ((1<<(HBITS-((HBITS/HBITS_-(HBITS%HBITS_==0))*HBITS_))) - 1)]);\
+}\
+\
+static void HNAME##_free(void *h, int p)\
+{\
+	int i;\
+\
+	if (h) {\
+		if (p < HBITS - (HBITS-((HBITS/HBITS_-(HBITS%HBITS_==0))*HBITS_))) {\
+			p += HBITS_;\
+			for (i = 0; i < (1<<HBITS_); i++)\
+				HNAME##_free((*((HNAME##_ *) h))[i], p);\
+		}\
+		kfree(h);\
+	}\
+}\
+\
+static void *HNAME##_init(int p)\
+{\
+	if (p < HBITS - (HBITS-((HBITS/HBITS_-(HBITS%HBITS_==0))*HBITS_))) {\
+		int i;\
+		HNAME##_ *h = kmalloc(sizeof(*h), GFP_KERNEL);\
+\
+		if (h) {\
+			p += HBITS_;\
+			for (i = 0; i < (1<<HBITS_); i++)\
+				if (!((*h)[i] = HNAME##_init(p))) {\
+					for (i--; i >= 0; i--)\
+						HNAME##_free((*h)[i], p);\
+					kfree(h);\
+					return NULL;\
+				}\
+		}\
+		return h;\
+	} else\
+		return kzalloc(sizeof(HNAME##__), GFP_KERNEL);\
+}\
+\
+static inline int u32_to_##HNAME(u32 x)\
+{\
+	int i;\
+	for (i = HBITS; i < 32; i += HBITS)\
+		x ^= x >> i;\
+	return x & ((1ULL<<HBITS) - 1);\
 }
 
-static void _tcphash_free(void *h, int p)
-{
-	int i;
 
-	if (h) {
-		if (p < HBITS - HBITS__) {
-			p += HBITS_;
-			for (i = 0; i < HSIZE_; i++)
-				_tcphash_free((*((tcphash_ *) h))[i], p);
-		}
-		kfree(h);
-	}
-}
+#endif
 
-static void *_tcphash_init(int p)
-{
-	if (p < HBITS - HBITS__) {
-		int i;
-		tcphash_ *h = kmalloc(sizeof(*h), GFP_KERNEL);
-
-		if (h) {
-			p += HBITS_;
-			for (i = 0; i < HSIZE_; i++)
-				if (!((*h)[i] = _tcphash_init(p))) {
-					for (i--; i >= 0; i--)
-						_tcphash_free((*h)[i], p);
-					kfree(h);
-					return NULL;
-				}
-		}
-		return h;
-	} else
-		return kzalloc(sizeof(tcphash__), GFP_KERNEL);
-}
-
-static inline void *tcphash_init(void)
-{
-	return _tcphash_init(0);
-}
-
-static inline void tcphash_free(void *h)
-{
-	_tcphash_free(h, 0);
-}
+_ARRAY(tcphash,TCP_HBITS,4,struct hashitem);
+#ifdef USE_WINSCALE
+_ARRAY(win2ws,16,4,u8);
 #endif
 
 static inline void tcphash_free2(void *h)
@@ -1562,7 +1570,7 @@ static inline void tcphash_free2(void *h)
 			return;
 		tcphash = NULL;
 	}
-	tcphash_free(h);
+	tcphash_free(h, 0);
 }
 
 static void tree_free(node n)
@@ -1886,11 +1894,11 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	aseq = ntohl(TH->ack_seq);
 	if (!cl->tcphash) {
 		if (!tcphash)
-			tcphash = tcphash_init();
+			tcphash = tcphash_init(0);
 		cl->tcphash = tcphash;
 		tcphash_use++;
 	}
-	h = tcphash_get(cl->tcphash, tohash(x));
+	h = tcphash_get(cl->tcphash, u32_to_tcphash(x));
 	if (TH->syn) {
 #ifdef USE_WINSCALE
 		/* get winscale */
@@ -2031,13 +2039,19 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	      next_aseq:
 		a = 1;
 		if (h->ack_seq && aseq) {
+#ifdef USE_WINSCALE
+			u8 *w = win2ws_get(win2ws, TH->window);
+
+			if (h->ws)
+				*w = *w ? ((*w)*3 + h->ws + 3) >> 2 : h->ws;
+#endif
 			a = aseq - h->ack_seq;
 			if (a > 1ul << 30 /* rfc */
 #ifdef MAX_WIN
-			    || a > MAX_WIN(q,cl)
+			    || a > MAX_WIN(q->max_rate)
 #endif
 #ifdef USE_WINSCALE
-			    || a >> h->ws > 65536
+			    || a >> *w > 65536
 #endif
 			    )
 				goto set_aseq;
@@ -2991,7 +3005,7 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	}
 	if (cl->state & TC_PSP_MODE_RETRANS) {
 		if (!cl->tcphash)
-			cl->tcphash = tcphash_init();
+			cl->tcphash = tcphash_init(0);
 	} else if (cl->tcphash) {
 		tcphash_free2(cl->tcphash);
 		cl->tcphash = NULL;
@@ -3158,12 +3172,18 @@ static struct Qdisc_ops psp_qdisc_ops __read_mostly = {
 
 static int __init psp_module_init(void)
 {
+#ifdef USE_WINSCALE
+	win2ws = win2ws_init(0);
+#endif
 	return register_qdisc(&psp_qdisc_ops);
 }
 
 static void __exit psp_module_exit(void)
 {
 	unregister_qdisc(&psp_qdisc_ops);
+#ifdef USE_WINSCALE
+	win2ws_free(win2ws, 0);
+#endif
 }
 
 module_init(psp_module_init)
