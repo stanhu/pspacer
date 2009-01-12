@@ -1133,8 +1133,11 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	struct psp_sched_data *q = qdisc_priv(sch);
 	clock_delta len[2] = { skb->len, SKB_BACKSIZE(skb) };
 	u64 t, clock;
-	unsigned int d, npkt;
-	unsigned long _rate = q->max_rate;
+	unsigned int d, d1, npkt;
+#ifdef MAX_WIN
+	unsigned long rate;
+	u64 limit;
+#endif
 
 #ifdef CONFIG_NET_SCH_PSP_FORCE_GAP
 	q->last = cl;
@@ -1145,6 +1148,10 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	    q->clock0 = q->clock += skb->len + HW_GAP(q) + FCS;
 	if (!cl)
 		return;
+#ifdef MAX_WIN
+	limit = MAX_WIN(rate = q->max_rate);
+	d1 = 0;
+#endif
 	cl = list_root(cl);
       next:
 	d = cl->direction;
@@ -1180,7 +1187,18 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	}
 	if (cl->rate == 0)
 		goto normal;
-	_rate = cl->rate;
+#ifdef MAX_WIN
+#if 1
+	if (rate > cl->rate && d1 == d) {
+	    rate = q->max_rate;
+	    d1 = d;
+	}
+	limit = ((u64)rate + cl->rate) * cl->rate;
+	do_div(limit,rate - cl->rate);
+	limit = MAX_WIN(limit);
+	rate = cl->rate;
+#endif
+#endif
 #define MUL_DIV_ROUND(res,x,y,z,tail) res=(x)*(y)+tail; tail=do_div(res,(z));
 #define MUL_DIV_ROUND_UP(res,x,y,z,tail) res=(x)*(y)+(z)-1-tail; tail=((z)-do_div(res,(z)))%(z);
 	switch (cl->state & MAJOR_MODE_MASK) {
@@ -1232,10 +1250,8 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		break;
 	}
       gap0:
-      rate0:
 #ifdef MAX_WIN
-	/* may be good */
-	if ((s64)((t = clock - MAX_WIN(_rate)) - cl->clock) > 0)
+	if ((s64)((t = clock - limit) - cl->clock) > 0)
 		cl->clock = t;
 #endif
 	/* moved from psp_dequeue() */
@@ -1558,7 +1574,7 @@ static inline int u32_to_##HNAME(u32 x)\
 
 _ARRAY(tcphash,TCP_HBITS,4,struct hashitem);
 #ifdef USE_WINSCALE
-_ARRAY(win2ws,16,4,u8);
+_ARRAY(win2ws,16,9,u8);
 #endif
 
 static inline void tcphash_free2(void *h)
