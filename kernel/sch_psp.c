@@ -1189,7 +1189,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		goto normal;
 #ifdef MAX_WIN
 #if 1
-	if (rate > cl->rate && d1 == d) {
+	if (rate <= cl->rate || d1 != d) {
 	    rate = q->max_rate;
 	    d1 = d;
 	}
