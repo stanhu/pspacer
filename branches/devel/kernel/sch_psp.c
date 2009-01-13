@@ -1421,7 +1421,7 @@ static struct psp_class *lookup_next_class(struct Qdisc *sch,
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl, *found = NULL;
 	clock_delta nearest = q->mtu;
-	s64 oldest = 0;
+	s64 oldest = 1;
 
 	/* pacing class */
 	found = lookup_early_class(q, &q->pacing_list, &nearest, &oldest);
@@ -1448,7 +1448,7 @@ static inline struct psp_class *lookup_next_class(struct Qdisc *sch,
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl;
 	clock_delta nearest = q->mtu;
-	s64 oldest = 0;
+	s64 oldest = 1;
 
 	/* pacing class, then normal class */
 	if ((cl = lookup_early_class(q, &q->pacing_list, &nearest, &oldest)) == NULL) {
