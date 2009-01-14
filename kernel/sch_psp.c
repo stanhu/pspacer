@@ -104,6 +104,7 @@
 #define USE_WINSCALE
 
 #define MAX_WIN(rate) ((rate) >> 3)  /* empiric timeout */
+#define QTIMEOUT(rate) ((rate) >> 4)
 
 #ifdef gap_u64
 typedef u64 clock_delta;
@@ -1134,7 +1135,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	clock_delta len[2] = { skb->len, SKB_BACKSIZE(skb) };
 	u64 t, clock;
 	unsigned int d, d1, npkt;
-#ifdef MAX_WIN
+#ifdef QTIMEOUT
 	unsigned long rate;
 	u64 limit;
 #endif
@@ -1148,8 +1149,8 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	    q->clock0 = q->clock += skb->len + HW_GAP(q) + FCS;
 	if (!cl)
 		return;
-#ifdef MAX_WIN
-	limit = MAX_WIN(rate = q->max_rate);
+#ifdef QTIMEOUT
+	limit = clock - QTIMEOUT(rate = q->max_rate);
 	d1 = 0;
 #endif
 	cl = list_root(cl);
@@ -1187,17 +1188,15 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	}
 	if (cl->rate == 0)
 		goto normal;
-#ifdef MAX_WIN
-#if 1
+#ifdef QTIMEOUT
 	if (rate <= cl->rate || d1 != d) {
 	    rate = q->max_rate;
 	    d1 = d;
 	}
 	limit = ((u64)rate + cl->rate) * cl->rate;
 	do_div(limit,rate - cl->rate);
-	limit = MAX_WIN(limit);
+	limit = clock - QTIMEOUT(limit);
 	rate = cl->rate;
-#endif
 #endif
 #define MUL_DIV_ROUND(res,x,y,z,tail) res=(x)*(y)+tail; tail=do_div(res,(z));
 #define MUL_DIV_ROUND_UP(res,x,y,z,tail) res=(x)*(y)+(z)-1-tail; tail=((z)-do_div(res,(z)))%(z);
@@ -1250,9 +1249,9 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		break;
 	}
       gap0:
-#ifdef MAX_WIN
-	if ((s64)((t = clock - limit) - cl->clock) > 0)
-		cl->clock = t;
+#ifdef QTIMEOUT
+	if ((s64)(limit - cl->clock) > 0)
+		cl->clock = limit;
 #endif
 	/* moved from psp_dequeue() */
 	QSTATS(cl).backlog -= len[d];
@@ -1324,11 +1323,10 @@ static inline struct sk_buff *psp_prefetch(struct psp_class *cl)
 
 static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 						   *q, struct list_head *list,
-						   clock_delta *diff,
-						   s64 *mindiff)
+						   clock_delta *diff)
 {
 	struct psp_class *cl, *next = NULL;
-	s64 d, cdiff, x;
+	s64 d, cdiff, x, mindiff = 1;
 	struct sk_buff *skb;
 	clock_delta tt;
 	unsigned long len[2];
@@ -1361,20 +1359,31 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 			tt = (len[0] = skb->len) + HW_GAP(q) + FCS;
 			len[1] = SKB_BACKSIZE(skb);
 			cdiff = (s64) (cl1->clock - q->clock) - tt;
-			/* not counted (backrate) pkt: push */
-			if ((t = len[cl1->direction]) == 0 && cdiff > 0)
-				cdiff = 0;
+			t = len[cl1->direction];
 #ifdef CONFIG_NET_SCH_PSP_PKT_GAP
-			if ((d = psp_tstamp(skb) - q->clock) < cdiff) {
+			d = psp_tstamp(skb) - q->clock;
+			if (t == 0) {
+				cdiff = d;
+				/* all next classes unrate this pkt */
+				goto cmp;
+			}
+			if (d < cdiff) {
 				x = cdiff;
 				cdiff = d;
 				d = x;
 			}
 #else
+			if (t == 0) {
+				d = psp_tstamp(skb) - q->clock;
+				if (d > 0)
+					d = 0;
+				cdiff = d;
+				goto cmp;
+			}
 			d = cdiff;
 #endif
 			while ((cl2 = cl1->next)) {
-				if (cl1->t && cl1->rate && t) {
+				if (cl1->t && cl1->rate) {
 					t = (t + DIV_ROUND_UP((unsigned long)t,
 							      cl1->mtu) *
 					     cl1->hw_gap) * q->max_rate;
@@ -1382,14 +1391,9 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 					tt += t;
 				}
 				/* skip classes unrated for this pkt */
-			skip:
-				t = len[cl2->direction];
+				if ((t = len[cl2->direction]) == 0)
+					goto cmp;
 				x = (s64) (cl2->clock - q->clock) - tt;
-				if (t == 0 && x > 0) {
-					if (!(cl2 = cl2->next))
-						goto cmp;
-					goto skip;
-				}
 				cl1 = cl2;
 				/* d - maximum. cdiff - minimum */
 				if (x > d)
@@ -1399,13 +1403,16 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 			}
 		} else		/* not leaf or exception */
 			continue;
-	      cmp:
+	cmp:
 		if (d > 0) {
 			if (*diff > d)
 				*diff = d;
-		} else if (*mindiff > cdiff) {
-			*mindiff = cdiff;
-			next = cl;
+		} else {
+			x = -((-(cdiff + d)) >> 1);
+			if (x < mindiff) {
+				mindiff = x;
+				next = cl;
+			}
 		}
 	}
 	return next;
@@ -1421,10 +1428,9 @@ static struct psp_class *lookup_next_class(struct Qdisc *sch,
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl, *found = NULL;
 	clock_delta nearest = q->mtu;
-	s64 oldest = 1;
 
 	/* pacing class */
-	found = lookup_early_class(q, &q->pacing_list, &nearest, &oldest);
+	found = lookup_early_class(q, &q->pacing_list, &nearest);
 	if (found)
 		return found;
 
@@ -1448,12 +1454,11 @@ static inline struct psp_class *lookup_next_class(struct Qdisc *sch,
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl;
 	clock_delta nearest = q->mtu;
-	s64 oldest = 1;
 
 	/* pacing class, then normal class */
-	if ((cl = lookup_early_class(q, &q->pacing_list, &nearest, &oldest)) == NULL) {
+	if ((cl = lookup_early_class(q, &q->pacing_list, &nearest)) == NULL) {
 		if ((cl =
-		     lookup_early_class(q, &q->normal_list, &nearest, &oldest)) == NULL)
+		     lookup_early_class(q, &q->normal_list, &nearest)) == NULL)
 			*gapsize = cut_gap(q, nearest);
 	}
 
