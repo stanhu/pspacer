@@ -151,7 +151,7 @@ static const unsigned char gap_dest[ETH_ALEN] = {0x01, 0x80, 0xc2, 0x00,
 static struct sk_buff *alloc_gap_packet(struct Qdisc *sch, int size)
 {
 	struct sk_buff *skb;
-	struct net_device *dev = sch->dev;
+	struct net_device *dev = qdisc_dev(sch);
 	struct gaphdr *gap;
 	int pause_time = 0;
 
@@ -175,7 +175,7 @@ static struct sk_buff *alloc_gap_packet(struct Qdisc *sch, int size)
 	gap->h_opcode = __constant_htons(0x0001);
 	gap->h_param = htons(pause_time);
 
-	skb->dev = sch->dev;
+	skb->dev = qdisc_dev(sch);
 	skb->protocol = __constant_htons(ETH_P_802_3);
 
 	return skb;
@@ -240,7 +240,11 @@ static struct psp_class *psp_classify(struct sk_buff *skb, struct Qdisc *sch,
 		if (cl->level == 0)
 			return cl;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 	*qerr = NET_XMIT_BYPASS;
+#else
+	*qerr = NET_XMIT_SUCCESS | __NET_XMIT_BYPASS;
+#endif
 	tcf = q->filter_list;
 	while (tcf && (result = tc_classify(skb, tcf, &res)) >= 0) {
 #ifdef CONFIG_NET_CLS_ACT
@@ -409,27 +413,33 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 		__skb_queue_tail(&q->requeue, skb);
 		q->direct_pkts++;
 	} else if (cl == NULL) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 		if (err == NET_XMIT_BYPASS)
+#else
+		if (err & __NET_XMIT_BYPASS)
+#endif
 			QSTATS(sch).drops++;
 		kfree_skb(skb);
 		return err;
 	} else {
-		err = cl->qdisc->ops->enqueue(skb, cl->qdisc);
+		err = qdisc_enqueue(skb, cl->qdisc);
 		if (unlikely(err != NET_XMIT_SUCCESS)) {
-			QSTATS(sch).drops++;
-			QSTATS(cl).drops++;
+			if (net_xmit_drop_count(err)) {
+				QSTATS(sch).drops++;
+				QSTATS(cl).drops++;
+			}
 			return err;
 		}
 
 		BSTATS(cl).packets++;
-		BSTATS(cl).bytes += skb->len;
+		BSTATS(cl).bytes += qdisc_pkt_len(skb);
 		if (!(cl->state & FLAG_ACTIVE))
 			psp_activate(q, cl);
 	}
 
 	sch->q.qlen++;
 	BSTATS(sch).packets++;
-	BSTATS(sch).bytes += skb->len;
+	BSTATS(sch).bytes += qdisc_pkt_len(skb);
 	return NET_XMIT_SUCCESS;
 }
 
@@ -450,7 +460,7 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 	struct sk_buff *skb = NULL;
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl;
-	u64 gapsize;
+	u64 gapsize = 0;
 
 	if (sch->q.qlen == 0)
 		return NULL;
@@ -564,7 +574,7 @@ static int psp_change(struct Qdisc *sch, struct nlattr *opt)
 static int psp_init(struct Qdisc *sch, struct nlattr *opt)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
-	struct net_device *dev = sch->dev;
+	struct net_device *dev = qdisc_dev(sch);
 	struct ethtool_cmd cmd = { ETHTOOL_GSET };
 	int i, ret;
 
@@ -587,12 +597,11 @@ static int psp_init(struct Qdisc *sch, struct nlattr *opt)
 		return -EINVAL;
 	}
 
-#ifdef NETIF_F_TSO
 	if (dev->features & NETIF_F_TSO) {
-		printk(KERN_ERR "psp: PSPacer does not support TSO. You have"
-		       " to disable it by using \"ethtool -K %s tso off\"\n",
+		printk(KERN_ERR "psp: TSO is enabled. PSPacer works with TSO,"
+		       " but the transmission rate is not so accurate. You can"
+		       " disable it by using \"ethtool -K %s tso off\"\n",
 		       dev->name);
-		return -EINVAL;
 	}
 
 	if (dev->ethtool_ops && dev->ethtool_ops->get_settings) {
@@ -601,7 +610,6 @@ static int psp_init(struct Qdisc *sch, struct nlattr *opt)
 			do_div(phy_rate, BITS_PER_BYTE);
 		}
 	}
-#endif
 
 	q->ifg = 12; /* default ifg is 12 byte. */
 	ret = psp_change(sch, opt);
@@ -783,12 +791,8 @@ static int psp_graft(struct Qdisc *sch, unsigned long arg, struct Qdisc *new,
 	if (cl->level != 0)
 		return -EINVAL;
 	if (new == NULL) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,20)
-		new = qdisc_create_dflt(sch->dev, &pfifo_qdisc_ops,
-					cl->classid);
-#else
-		new = qdisc_create_dflt(sch->dev, &pfifo_qdisc_ops);
-#endif
+		new = qdisc_create_dfltq(qdisc_dev(sch), sch->dev_queue,
+					 &pfifo_qdisc_ops, cl->classid);
 		if (new == NULL)
 			new = &noop_qdisc;
 	}
@@ -856,11 +860,8 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 		INIT_LIST_HEAD(&cl->dlist);
 		INIT_LIST_HEAD(&cl->plist);
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,20)
-		new_q = qdisc_create_dflt(sch->dev, &pfifo_qdisc_ops, classid);
-#else
-		new_q = qdisc_create_dflt(sch->dev, &pfifo_qdisc_ops);
-#endif
+		new_q = qdisc_create_dfltq(qdisc_dev(sch), sch->dev_queue,
+					   &pfifo_qdisc_ops, classid);
 		sch_tree_lock(sch);
 		if (parent && parent->level != 0) {
 			unsigned int qlen = parent->qdisc->q.qlen;
