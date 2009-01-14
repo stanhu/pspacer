@@ -98,6 +98,17 @@ skb_set_timestamp(struct sk_buff *skb, const struct timeval *stamp)
 }
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
+#define qdisc_create_dfltq(dev, devq, ops, classid) \
+	qdisc_create_dflt(dev, devq, ops, classid)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,20)
+#define qdisc_create_dfltq(dev, devq, ops, classid) \
+	qdisc_create_dflt(dev, ops, classid)
+#else
+#define qdisc_create_dfltq(dev, devq, ops, classid) \
+	qdisc_create_dflt(dev, ops)
+#endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,22)
 #define skb_tail_pointer(skb) ((skb)->tail)
 #define skb_reset_network_header(skb) ((skb)->nh.raw = (skb)->data)
@@ -141,6 +152,13 @@ skb_set_timestamp(struct sk_buff *skb, const struct timeval *stamp)
 
 #ifndef BITS_PER_BYTE /* include/linux/bitops.h */
 #define BITS_PER_BYTE 8
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
+#define net_xmit_drop_count(e) (1)	/* FIXME */
+#define qdisc_dev(sch) ((sch)->dev))
+#define qdisc_enqueue(skb, sch) ((sch)->enqueue((skb), (sch)))
+#define qdisc_pkt_len(skb) ((skb)->len)
 #endif
 
 #ifndef ETH_P_PAUSE /* include/linux/if_ether.h */
