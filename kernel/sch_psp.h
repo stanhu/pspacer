@@ -1,7 +1,7 @@
 /*
  * net/sched/sch_psp.h	PSPacer: Precise Software Pacer
  *
- *		Copyright (C) 2004-2008 National Institute of Advanced
+ *		Copyright (C) 2004-2009 National Institute of Advanced
  *		Industrial Science and Technology (AIST), Japan.
  *
  *		This program is free software; you can redistribute it and/or
@@ -98,15 +98,15 @@ skb_set_timestamp(struct sk_buff *skb, const struct timeval *stamp)
 }
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,20)
 #define qdisc_create_dfltq(dev, devq, ops, classid) \
-	qdisc_create_dflt(dev, devq, ops, classid)
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,20)
+	qdisc_create_dflt(dev, ops)
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 #define qdisc_create_dfltq(dev, devq, ops, classid) \
 	qdisc_create_dflt(dev, ops, classid)
 #else
 #define qdisc_create_dfltq(dev, devq, ops, classid) \
-	qdisc_create_dflt(dev, ops)
+	qdisc_create_dflt(dev, devq, ops, classid)
 #endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,22)
@@ -137,6 +137,13 @@ skb_set_timestamp(struct sk_buff *skb, const struct timeval *stamp)
 #define _OPT(x) (x)
 #endif
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
+#define net_xmit_drop_count(e) (1)	/* FIXME */
+#define qdisc_dev(sch) ((sch)->dev)
+#define qdisc_enqueue(skb, sch) ((sch)->enqueue((skb), (sch)))
+#define qdisc_pkt_len(skb) ((skb)->len)
+#endif
+
 #ifndef rtattr_parse_nested
 #define rtattr_parse_nested(tb, max, rta) \
 	rtattr_parse((tb), (max), RTA_DATA((rta)), RTA_PAYLOAD((rta)))
@@ -152,13 +159,6 @@ skb_set_timestamp(struct sk_buff *skb, const struct timeval *stamp)
 
 #ifndef BITS_PER_BYTE /* include/linux/bitops.h */
 #define BITS_PER_BYTE 8
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
-#define net_xmit_drop_count(e) (1)	/* FIXME */
-#define qdisc_dev(sch) ((sch)->dev))
-#define qdisc_enqueue(skb, sch) ((sch)->enqueue((skb), (sch)))
-#define qdisc_pkt_len(skb) ((skb)->len)
 #endif
 
 #ifndef ETH_P_PAUSE /* include/linux/if_ether.h */

@@ -1,3 +1,8 @@
+2009-01-14  Ryousei Takano <takano-ryousei@aist.go.jp>
+
+	* kernel/sch_psp.c: Fix for kernel 2.6.27.
+	(contributed by Denis Kaganovich <mahatma@eu.by>)
+
 2008-09-05  Ryousei Takano <takano-ryousei@aist.go.jp>
 
 	* kernel/sch_psp.c: Fix for kernel 2.6.26.

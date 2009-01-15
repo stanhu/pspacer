@@ -1,7 +1,7 @@
 /*
  * q_psp.c		PSPacer: Precise Software Pacer
  *
- *		Copyright (C) 2004-2008 National Institute of Advanced
+ *		Copyright (C) 2004-2009 National Institute of Advanced
  *		Industrial Science and Technology (AIST), Japan.
  *
  *		This program is free software; you can redistribute it and/or
