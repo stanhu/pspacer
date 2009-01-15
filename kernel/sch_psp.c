@@ -104,7 +104,7 @@
 #define USE_WINSCALE
 
 #define MAX_WIN(rate) ((rate) >> 3)  /* empiric timeout */
-#define QTIMEOUT(rate) ((rate) >> 4)
+#define QTIMEOUT(rate,direction) ((rate) >> (4 - (direction)))
 
 #ifdef gap_u64
 typedef u64 clock_delta;
@@ -1146,45 +1146,24 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 
 	clock =
 	    /* update qdisc clock */
-	    q->clock0 = q->clock += skb->len + HW_GAP(q) + FCS;
+	    q->clock0 = q->clock += (t = skb->len + HW_GAP(q) + FCS);
 	if (!cl)
 		return;
 #ifdef QTIMEOUT
-	limit = clock - QTIMEOUT(rate = q->max_rate);
+	limit = clock - QTIMEOUT(rate = q->max_rate, 0);
 	d1 = 0;
 #endif
 	cl = list_root(cl);
       next:
 	d = cl->direction;
-	if (QSTATS(cl).backlog == 0) {
+	if (QSTATS(cl).backlog == 0)
 		/* reset too (for backrate) */
 		cl->state |= FLAG_DMARK;
-		goto normal;
-	}
-	if ((cl->state & FLAG_DMARK)) {
+	else if ((cl->state & FLAG_DMARK)) {
 		/* reset class clock */
 		cl->state &= ~FLAG_DMARK;
 		/* reset to parent ethernet + its transfer time */
 		cl->clock = clock;
-	}
-	t = len[d];
-	if (t == 0)
-		goto gap0;
-	npkt = DIV_ROUND_UP(len[d], cl->mtu);
-	t += npkt * cl->hw_gap;
-#ifdef CONFIG_NET_SCH_PSP_EST
-	estimate_class_rate(&cl->bps, cl->phaze_bytes, q, cl->ewma * npkt);
-	cl->phaze_bytes += t;
-	cl->qdisc->rate_est.bps = cl->bps.av;
-#endif
-	if (cl->autorate) {
-#ifndef CONFIG_NET_SCH_PSP_EST
-		estimate_class_rate(&cl->bps, cl->phaze_bytes, q,
-				    cl->ewma * npkt);
-		cl->phaze_bytes += t;
-#endif
-		cl->rate = min_t(unsigned long, q->max_rate,
-				 cl->bps.av < MIN_TARGET_RATE ? 0 : cl->bps.av);
 	}
 	if (cl->rate == 0)
 		goto normal;
@@ -1195,9 +1174,13 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	}
 	limit = ((u64)rate + cl->rate) * cl->rate;
 	do_div(limit,rate - cl->rate);
-	limit = clock - QTIMEOUT(limit);
+	limit = clock - QTIMEOUT(limit, d);
 	rate = cl->rate;
 #endif
+	if ((t = len[d]) == 0)
+		goto gap0;
+	npkt = DIV_ROUND_UP((unsigned long)t, cl->mtu);
+	t += npkt * cl->hw_gap;
 #define MUL_DIV_ROUND(res,x,y,z,tail) res=(x)*(y)+tail; tail=do_div(res,(z));
 #define MUL_DIV_ROUND_UP(res,x,y,z,tail) res=(x)*(y)+(z)-1-tail; tail=((z)-do_div(res,(z)))%(z);
 	switch (cl->state & MAJOR_MODE_MASK) {
