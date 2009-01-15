@@ -1,7 +1,7 @@
 /*
  * net/sched/sch_psp.c	PSPacer: Precise Software Pacer
  *
- *		Copyright (C) 2004-2008 National Institute of Advanced
+ *		Copyright (C) 2004-2009 National Institute of Advanced
  *		Industrial Science and Technology (AIST), Japan.
  *
  *		This program is free software; you can redistribute it and/or
@@ -597,6 +597,7 @@ static int psp_init(struct Qdisc *sch, struct nlattr *opt)
 		return -EINVAL;
 	}
 
+#ifdef NETIF_F_TSO
 	if (dev->features & NETIF_F_TSO) {
 		printk(KERN_ERR "psp: TSO is enabled. PSPacer works with TSO,"
 		       " but the transmission rate is not so accurate. You can"
@@ -610,6 +611,7 @@ static int psp_init(struct Qdisc *sch, struct nlattr *opt)
 			do_div(phy_rate, BITS_PER_BYTE);
 		}
 	}
+#endif
 
 	q->ifg = 12; /* default ifg is 12 byte. */
 	ret = psp_change(sch, opt);
