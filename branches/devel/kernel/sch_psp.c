@@ -104,7 +104,8 @@
 #define USE_WINSCALE
 
 #define MAX_WIN(rate) ((rate) >> 3)  /* empiric timeout */
-#define QTIMEOUT(rate,direction) ((rate) >> (4 - (direction)))
+/* #define QTIMEOUT(rate,direction) ((rate) >> (4 - (direction))) */
+#define QTIMEOUT(rate,direction) ((rate) >> 3)
 
 #ifdef gap_u64
 typedef u64 clock_delta;
@@ -213,8 +214,6 @@ struct psp_skb_cb {
 #define NHINTS ((48-sizeof(struct psp_skb_cb))/sizeof(struct list_head))
 #define psp_tstamp(skb) (((struct psp_skb_cb *)(&(skb)->cb))->clock)
 #define SKB_BACKSIZE(skb) (((struct psp_skb_cb *)(&(skb)->cb))->backsize)
-
-#define TCP_HBITS 16
 
 struct est_data {
 	unsigned long av;
@@ -1484,7 +1483,7 @@ static void rrr_move(struct psp_class *cl, struct psp_class *master)
 
 #if 0
 /* fastest, but may be arch dependend */
-#define _ARRAY(HNAME,HBITS,HBITS_,item) \
+#define _ARRAY(HNAME,HBITS,HBITS_,HBITS__,item) \
 typedef item HNAME##_t[(1ULL<<HBITS)];\
 static inline item *HNAME##_get(void *h, unsigned long key)\
 {\
@@ -1511,18 +1510,18 @@ static inline int u32_to_##HNAME(u32 x)\
 
 #else
 /* splitting array to 4K pages, using constants and unrollable loops, fast */
-#define _ARRAY(HNAME,HBITS,HBITS_,item) \
+#define _ARRAY(HNAME,HBITS,HBITS_,HBITS__,item) \
 typedef void *HNAME##_[(1<<HBITS_)];\
-typedef item HNAME##__[(1<<(HBITS-((HBITS/HBITS_-(HBITS%HBITS_==0))*HBITS_)))];\
+typedef item HNAME##__[(1<<HBITS__)];\
 static inline item *HNAME##_get(void *h, unsigned long key)\
 {\
 	int i;\
 \
-	for (i = 0; i < (HBITS - (HBITS-((HBITS/HBITS_-(HBITS%HBITS_==0))*HBITS_))) / HBITS_; i++) {\
+	for (i = 0; i < (HBITS - HBITS__) / HBITS_; i++) {\
 		h = (*((HNAME##_ *) h))[key & ((1<<HBITS_) - 1)];\
 		key >>= HBITS_;\
 	}\
-	return &((*(HNAME##__ *) h)[key & ((1<<(HBITS-((HBITS/HBITS_-(HBITS%HBITS_==0))*HBITS_))) - 1)]);\
+	return &((*(HNAME##__ *) h)[key & ((1<<HBITS__) - 1)]);\
 }\
 \
 static void HNAME##_free(void *h, int p)\
@@ -1530,7 +1529,7 @@ static void HNAME##_free(void *h, int p)\
 	int i;\
 \
 	if (h) {\
-		if (p < HBITS - (HBITS-((HBITS/HBITS_-(HBITS%HBITS_==0))*HBITS_))) {\
+		if (p < HBITS - HBITS__) {\
 			p += HBITS_;\
 			for (i = 0; i < (1<<HBITS_); i++)\
 				HNAME##_free((*((HNAME##_ *) h))[i], p);\
@@ -1541,7 +1540,11 @@ static void HNAME##_free(void *h, int p)\
 \
 static void *HNAME##_init(int p)\
 {\
-	if (p < HBITS - (HBITS-((HBITS/HBITS_-(HBITS%HBITS_==0))*HBITS_))) {\
+	if ((HBITS - HBITS__) % HBITS_) {\
+		printk(KERN_ERR "psp: bad array parameters\n");\
+		return NULL;\
+	}\
+	if (p < HBITS - HBITS__) {\
 		int i;\
 		HNAME##_ *h = kmalloc(sizeof(*h), GFP_KERNEL);\
 \
@@ -1568,12 +1571,11 @@ static inline int u32_to_##HNAME(u32 x)\
 	return x & ((1ULL<<HBITS) - 1);\
 }
 
-
 #endif
 
-_ARRAY(tcphash,TCP_HBITS,4,struct hashitem);
+_ARRAY(tcphash,16,6,4,struct hashitem);
 #ifdef USE_WINSCALE
-_ARRAY(win2ws,16,9,u8);
+_ARRAY(win2ws,16,5,11,u8);
 #endif
 
 static inline void tcphash_free2(void *h)
