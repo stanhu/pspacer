@@ -129,7 +129,7 @@ skb_set_timestamp(struct sk_buff *skb, const struct timeval *stamp)
 
 #if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,26)
 #define qdisc_dev(sch) ((sch)->dev)
-#define psched_mtu(sch) (qdisc_dev((sch))->mtu+qdisc_dev((sch))->hard_header_len)
+#define psched_mtu(dev) ((dev)->mtu + (dev)->hard_header_len)
 #endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,25)
