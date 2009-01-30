@@ -103,8 +103,6 @@
 #define STRICT_TCP		/* safer but slower for multihomed link + variable window */
 #define USE_WINSCALE
 
-#define MAX_WIN(rate) ((rate) >> 3)  /* empiric timeout */
-/* #define QTIMEOUT(rate,direction) ((rate) >> (4 - (direction))) */
 #define QTIMEOUT(rate,direction) ((rate) >> 3)
 
 #ifdef gap_u64
@@ -1149,7 +1147,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	if (!cl)
 		return;
 #ifdef QTIMEOUT
-	limit = clock - QTIMEOUT(rate = q->max_rate, 0);
+	limit = QTIMEOUT(rate = q->max_rate, 0);
 	d1 = 0;
 #endif
 	cl = list_root(cl);
@@ -1173,7 +1171,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	}
 	limit = ((u64)rate + cl->rate) * cl->rate;
 	do_div(limit,rate - cl->rate);
-	limit = clock - QTIMEOUT(limit, d);
+	limit = QTIMEOUT(limit, d);
 	rate = cl->rate;
 #endif
 	if ((t = len[d]) == 0)
@@ -1232,8 +1230,10 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	}
       gap0:
 #ifdef QTIMEOUT
-	if ((s64)(limit - cl->clock) > 0)
-		cl->clock = limit;
+	if ((s64)(clock - cl->clock) > (s64)limit)
+		cl->clock = clock - limit;
+	else if ((s64)(cl->clock - clock) > (s64)limit)
+		cl->clock = clock + limit;
 #endif
 	/* moved from psp_dequeue() */
 	QSTATS(cl).backlog -= len[d];
@@ -2064,9 +2064,6 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 #endif
 			a = aseq - h->ack_seq;
 			if (a > 1ul << 30 /* rfc */
-#ifdef MAX_WIN
-			    || a > MAX_WIN(q->max_rate)
-#endif
 #ifdef USE_WINSCALE
 			    || a >> *w > 65536
 #endif
