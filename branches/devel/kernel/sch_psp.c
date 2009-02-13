@@ -2321,6 +2321,7 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 	return err;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,29)
 static int psp_requeue(struct sk_buff *skb, struct Qdisc *sch)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
@@ -2332,6 +2333,7 @@ static int psp_requeue(struct sk_buff *skb, struct Qdisc *sch)
 #endif
 	return NET_XMIT_SUCCESS;
 }
+#endif
 
 static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 {
@@ -2508,8 +2510,8 @@ static int psp_change(struct Qdisc *sch, struct nlattr *opt)
 
 	if (qopt->chk != sizeof(*qopt)) {
 		printk(KERN_ERR
-		       "psp: qdisc options size / tc version mismatch (%u/%u)\n",
-		       qopt->chk, sizeof(*qopt));
+		       "psp: qdisc options size / tc version mismatch (%u/%li)\n",
+		       qopt->chk, (long)sizeof(*qopt));
 		return -EINVAL;
 	}
 
@@ -2883,8 +2885,8 @@ static int psp_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 
 	if (copt->chk != sizeof(*copt)) {
 		printk(KERN_ERR
-		       "psp: class options size / tc version mismatch (%u/%u)\n",
-		       copt->chk, sizeof(*copt));
+		       "psp: class options size / tc version mismatch (%u/%li)\n",
+		       copt->chk, (long)sizeof(*copt));
 		return -EINVAL;
 	}
 
@@ -3169,7 +3171,11 @@ static struct Qdisc_ops psp_qdisc_ops __read_mostly = {
 	.priv_size = sizeof(struct psp_sched_data),
 	.enqueue = psp_enqueue,
 	.dequeue = psp_dequeue,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,29)
 	.requeue = psp_requeue,
+#else
+	.peek = qdisc_peek_dequeued,
+#endif
 	.drop = psp_drop,
 	.init = psp_init,
 	.reset = psp_reset,
