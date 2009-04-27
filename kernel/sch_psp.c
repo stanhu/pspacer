@@ -112,7 +112,7 @@ struct psp_sched_data {
 						   order of the gap size) */
 	struct list_head normal_list;		/* no gap leaf class list */
 
-	struct sk_buff_head requeue;		/* requeued packet */
+	struct sk_buff_head direct_queue;	/* direct packet */
 	long direct_pkts;
 
 	struct tcf_proto *filter_list;		/* filter list */
@@ -410,7 +410,7 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 	cl = psp_classify(skb, sch, &err);
 	if (cl == PSP_DIRECT) {
 		/* enqueue to helper queue */
-		__skb_queue_tail(&q->requeue, skb);
+		__skb_queue_tail(&q->direct_queue, skb);
 		q->direct_pkts++;
 	} else if (cl == NULL) {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
@@ -443,17 +443,19 @@ static int psp_enqueue(struct sk_buff *skb, struct Qdisc *sch)
 	return NET_XMIT_SUCCESS;
 }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,29)
 static int psp_requeue(struct sk_buff *skb, struct Qdisc *sch)
 {
 	struct psp_sched_data *q = qdisc_priv(sch);
 
-	__skb_queue_head(&q->requeue, skb);
+	__skb_queue_head(&q->direct_queue, skb);
 	sch->q.qlen++;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,10)
 	QSTATS(sch).requeues++;
 #endif
 	return NET_XMIT_SUCCESS;
 }
+#endif
 
 static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 {
@@ -465,8 +467,8 @@ static struct sk_buff *psp_dequeue(struct Qdisc *sch)
 	if (sch->q.qlen == 0)
 		return NULL;
 
-	/* requeue */
-	skb = __skb_dequeue(&q->requeue);
+	/* direct queue */
+	skb = __skb_dequeue(&q->direct_queue);
 	if (skb != NULL) {
 		sch->q.qlen--;
 		return skb;
@@ -538,7 +540,7 @@ static void psp_reset(struct Qdisc *sch)
 		}
 	}
 
-	__skb_queue_purge(&q->requeue);
+	__skb_queue_purge(&q->direct_queue);
 	INIT_LIST_HEAD(&q->drop_list);
 	sch->q.qlen = 0;
 }
@@ -630,7 +632,7 @@ static int psp_init(struct Qdisc *sch, struct nlattr *opt)
 	INIT_LIST_HEAD(&q->drop_list);
 	INIT_LIST_HEAD(&q->pacing_list);
 	INIT_LIST_HEAD(&q->normal_list);
-	skb_queue_head_init(&q->requeue);
+	skb_queue_head_init(&q->direct_queue);
 
 	return 0;
 }
@@ -688,7 +690,7 @@ static void psp_destroy(struct Qdisc *sch)
 		list_for_each_entry_safe(cl, next, &q->hash[i], hlist)
 			psp_destroy_class(sch, cl);
 	}
-	__skb_queue_purge(&q->requeue);
+	__skb_queue_purge(&q->direct_queue);
 
 	/* free gap packet */
 	kfree_skb(q->gap);
@@ -1046,7 +1048,11 @@ static struct Qdisc_ops psp_qdisc_ops __read_mostly = {
 	.priv_size	=	sizeof(struct psp_sched_data),
 	.enqueue	=	psp_enqueue,
 	.dequeue	=	psp_dequeue,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,29)
 	.requeue	=	psp_requeue,
+#else
+	.peek		=	qdisc_peek_dequeued,
+#endif
 	.drop		=	psp_drop,
 	.init		=	psp_init,
 	.reset		=	psp_reset,
