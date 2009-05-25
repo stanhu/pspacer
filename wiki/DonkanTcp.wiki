@@ -1,0 +1,12 @@
+#Donkan-ryoku TCP
+
+= Introduction =
+
+Donkan-ryoku TCP consists of two parts:
+  * TCP congestion control module (tcp_zaru)
+  * receiver side kernel patch
+
+
+= Details =
+
+Please try at your own risk.
