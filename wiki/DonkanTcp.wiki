@@ -1,12 +1,16 @@
-#Donkan-ryoku TCP
+#labels linux,tcp
+「鈍感力」TCP
 
 = Introduction =
 
 Donkan-ryoku TCP consists of two parts:
-  * TCP congestion control module (tcp_zaru)
+  * TCP congestion control module (tcp_donkan)
   * receiver side kernel patch
 
 
 = Details =
 
 Please try at your own risk.
+
+
+= Download =
