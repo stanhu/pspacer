@@ -1,8 +1,8 @@
 diff --git a/include/linux/sysctl.h b/include/linux/sysctl.h
-index 483050c..b8ff223 100644
+index 39d471d..5c64951 100644
 --- a/include/linux/sysctl.h
 +++ b/include/linux/sysctl.h
-@@ -441,6 +441,7 @@ enum
+@@ -435,6 +435,7 @@ enum
  	NET_TCP_ALLOWED_CONG_CONTROL=123,
  	NET_TCP_MAX_SSTHRESH=124,
  	NET_TCP_FRTO_RESPONSE=125,
@@ -11,24 +11,24 @@ index 483050c..b8ff223 100644
  
  enum {
 diff --git a/include/net/tcp.h b/include/net/tcp.h
-index 54053de..c034eee 100644
+index 218235d..56b7648 100644
 --- a/include/net/tcp.h
 +++ b/include/net/tcp.h
-@@ -232,6 +232,7 @@ extern int sysctl_tcp_base_mss;
+@@ -236,6 +236,7 @@ extern int sysctl_tcp_base_mss;
  extern int sysctl_tcp_workaround_signed_windows;
  extern int sysctl_tcp_slow_start_after_idle;
  extern int sysctl_tcp_max_ssthresh;
 +extern int sysctl_tcp_unlimit_initial_rwin;
  
  extern atomic_t tcp_memory_allocated;
- extern atomic_t tcp_sockets_allocated;
+ extern struct percpu_counter tcp_sockets_allocated;
 diff --git a/net/ipv4/sysctl_net_ipv4.c b/net/ipv4/sysctl_net_ipv4.c
-index 53ef0f4..f43a48d 100644
+index 4710d21..18b3e2b 100644
 --- a/net/ipv4/sysctl_net_ipv4.c
 +++ b/net/ipv4/sysctl_net_ipv4.c
-@@ -819,6 +819,14 @@ ctl_table ipv4_table[] = {
- 		.mode		= 0644,
- 		.proc_handler	= &proc_dointvec,
+@@ -742,6 +742,14 @@ static struct ctl_table ipv4_table[] = {
+ 		.strategy	= sysctl_intvec,
+ 		.extra1		= &zero
  	},
 +	{
 +		.ctl_name	= NET_TCP_UNLIMIT_INITIAL_RWIN,
@@ -42,25 +42,25 @@ index 53ef0f4..f43a48d 100644
  };
  
 diff --git a/net/ipv4/tcp_output.c b/net/ipv4/tcp_output.c
-index 666d8a5..e48462b 100644
+index da2c3b8..252d90e 100644
 --- a/net/ipv4/tcp_output.c
 +++ b/net/ipv4/tcp_output.c
-@@ -61,6 +61,8 @@ int sysctl_tcp_base_mss __read_mostly = 512;
+@@ -59,6 +59,8 @@ int sysctl_tcp_base_mss __read_mostly = 512;
  /* By default, RFC2861 behavior.  */
  int sysctl_tcp_slow_start_after_idle __read_mostly = 1;
  
 +int sysctl_tcp_unlimit_initial_rwin __read_mostly = 0;
 +
- static void update_send_head(struct sock *sk, struct sk_buff *skb)
+ static void tcp_event_new_data_sent(struct sock *sk, struct sk_buff *skb)
  {
  	struct tcp_sock *tp = tcp_sk(sk);
-@@ -218,7 +220,8 @@ void tcp_select_initial_window(int __space, __u32 mss,
+@@ -225,7 +227,8 @@ void tcp_select_initial_window(int __space, __u32 mss,
  			init_cwnd = 2;
  		else if (mss > 1460)
  			init_cwnd = 3;
--		if (*rcv_wnd > init_cwnd*mss)
+-		if (*rcv_wnd > init_cwnd * mss)
 +		if (sysctl_tcp_unlimit_initial_rwin == 0 &&
-+		    *rcv_wnd > init_cwnd*mss)
- 			*rcv_wnd = init_cwnd*mss;
++		    *rcv_wnd > init_cwnd * mss)
+ 			*rcv_wnd = init_cwnd * mss;
  	}
  
