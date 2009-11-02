@@ -3,7 +3,7 @@
 I have observed non intuitive behavior of HTB on the Linux kernel 2.6.30 and the Myri-10G 10 GbE NIC.
 HTB can not accurately control the transmission rate at 10 Gigabit speed.
 
-I want to know what is happen.  I guess that HTB has a bug related to the time granularity.
+I want to know what is happen.  I guess that HTB has a problem related to the time granularity.
 
 = Experiment =
 
@@ -13,7 +13,8 @@ Intel 5100 chipset, 4 GB memory (DDR2-667), and Myricom Myri-10G
 Ethernet interface, which plugged into a PCI-Express x8 lane.  The MTU
 size is set to 9000 bytes.
 Each PC is running the Ubuntu 9.04 server edition and the Linux kernel
-2.6.30.  Some networking sysctl parameters were changed from the
+2.6.30.  The version of iproute2 is ss080725.
+Some networking sysctl parameters were changed from the
 default value, as follows:
 
 || net.core.netdev_max_backlog || 250000 ||
@@ -21,6 +22,12 @@ default value, as follows:
 || net.core.rmem_max                  || 16777216 ||
 || net.ipv4.tcp_rmem                    || 4096 87380 16777216 ||
 || net.ipv4.tcp_wmem                   || 4096 65536 16777216 ||
+
+The clock source is set to 'tsc.'
+{{{
+$ sudo cat /sys/devices/system/clocksource/clocksource0/current_clocksource
+tsc 
+}}}
 
 == Experimental results ==
 I measured the average bandwidth over a period of 5 seconds by using
@@ -39,3 +46,31 @@ target rate.
 
 http://pspacer.googlecode.com/svn/wiki/images/bw.diff.png
 
+== test script ==
+{{{
+$ cat iperf.bench.sh
+#!/bin/bash
+
+DEV=eth1
+MTU=9000
+DEST=192.168.0.2
+rate=100
+
+# set up HTB.
+sudo /sbin/tc qdisc add dev $DEV root handle 1: htb default 1
+sudo /sbin/tc class add dev $DEV parent 1: classid 1:1 htb rate ${rate}mbit mtu $MTU
+sudo /sbin/tc qdisc add dev eth1 parent 1:1 handle 10: pfifo
+
+# run iperf.
+while test $rate -lt 10000; do
+	f=`echo "scale=3;$rate/1000" | bc`
+	echo -n "$f "
+	sudo /sbin/tc class change dev $DEV parent 1: classid 1:1 htb mtu $MTU rate ${rate}mbit
+	iperf -t 5 -l 128k -c $DEST | grep "bits/sec" | awk '{print $8}'
+	sleep 1
+	rate=$((rate+100))
+done
+
+# clean up HTB.
+sudo /sbin/tc qdisc del dev $DEV root
+}}}
