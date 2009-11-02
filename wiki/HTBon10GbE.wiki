@@ -1,9 +1,12 @@
 #labels Linux,HTB
 = Introduction =
-I have observed non intuitive behavior of HTB on the Linux kernel 2.6.30 and the Myri-10G 10 GbE NIC.
-HTB can not accurately control the transmission rate at 10 Gigabit speed.
+I have observed a HTB accuracy problem on the Linux kernel 2.6.30 and the Myri-10G 10 GbE NIC.
+HTB can control the transmission rate at Gigabit speed, however it can not work well at 10 Gigabit speed.
 
-I want to know what is happen.  I guess that HTB has a problem related to the time granularity.
+I guess that HTB has a problem related to the time granularity.
+I want to know what is happen, and what should be do for fixing it.
+
+Any comments and suggestions will be welcome.
 
 = Experiment =
 
