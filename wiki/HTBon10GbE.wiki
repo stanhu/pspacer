@@ -1,0 +1,41 @@
+#labels Linux,HTB
+= Introduction =
+I have observed non intuitive behavior of HTB on the Linux kernel 2.6.30 and the Myri-10G 10 GbE NIC.
+HTB can not accurately control the transmission rate at 10 Gigabit speed.
+
+I want to know what is happen.  I guess that HTB has a bug related to the time granularity.
+
+= Experiment =
+
+== Experimental setting ==
+We use 2 PCs, comprised of two Intel Quad-core Xeon E5430 2.66~GHz,
+Intel 5100 chipset, 4 GB memory (DDR2-667), and Myricom Myri-10G
+Ethernet interface, which plugged into a PCI-Express x8 lane.  The MTU
+size is set to 9000 bytes.
+Each PC is running the Ubuntu 9.04 server edition and the Linux kernel
+2.6.30.  Some networking sysctl parameters were changed from the
+default value, as follows:
+
+|| net.core.netdev_max_backlog || 250000 ||
+|| net.core.wmem_max                 || 16777216 ||
+|| net.core.rmem_max                  || 16777216 ||
+|| net.ipv4.tcp_rmem                    || 4096 87380 16777216 ||
+|| net.ipv4.tcp_wmem                   || 4096 65536 16777216 ||
+
+== Experimental results ==
+I measured the average bandwidth over a period of 5 seconds by using
+the Iperf benchmark. The target rate, which is controlled by both
+PSPacer and HTB, was set from 100 Mbps to 10 Gbps every
+100 Mbps. 
+
+HTB is formed in a stepwise shape, as shown in Fig.1.
+
+http://pspacer.googlecode.com/svn/wiki/images/bw.png
+
+Fig.2 shows the difference between the target rate and the observed average bandwidth.
+HTB shows larger difference and wider variance than
+PSPacer. The observed bandwidth is up to 0.8 Gbps more than the
+target rate.
+
+http://pspacer.googlecode.com/svn/wiki/images/bw.diff.png
+
