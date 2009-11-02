@@ -4,7 +4,7 @@ set output "bw.png"
 set size 1.0,1.0
 set key left top
 #set key box
-set title "PSPacer/HTB on Myri-10G"
+set title "Fig.1: Target rate / Observed rate"
 set xlabel "Target Bandwidth (Gbps)"
 set ylabel "Observed Bandwidth Gbps)"
 set xrange [0:10]

@@ -4,8 +4,7 @@ set output "bw.diff.png"
 set size 1.0,1.0
 set key left top
 #set key box
-#set title "HTB on Myri-10G"
-set title "PSPacer/HTB on Myri-10G"
+set title "Fig.2: Target rate / Difference"
 set xlabel "Target Bandwidth (Gbps)"
 set ylabel "Observed Bandwidth - Target Bandwidth (Gbps)"
 #set xrange [1:4097]
