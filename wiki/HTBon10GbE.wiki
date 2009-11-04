@@ -55,6 +55,8 @@ the Iperf benchmark. The target rate, which is controlled by both
 PSPacer and HTB, was set from 100 Mbps to 10 Gbps every
 100 Mbps. 
 
+Note: PSPacer does not rely on any timer mechanisms.
+
 HTB is formed in a stepwise shape, as shown in Fig.1.
 
 http://pspacer.googlecode.com/svn/wiki/images/bw.png
