@@ -1,5 +1,5 @@
 #labels Linux,HTB
-= Introduction =
+= Summary =
 I have observed a HTB accuracy problem on the Linux kernel 2.6.30 and the Myri-10G 10 GbE NIC.
 HTB can control the transmission rate at Gigabit speed, however it can not work well at 10 Gigabit speed.
 
@@ -21,6 +21,8 @@ The packet scheduler might be possible to use a finer resolution keeping the 32 
 
 The scheduler timer resolution improves after the kernel 2.6.31 (See Jarek Poplawski's PSCHED_SHIFT patch).
 The result is shown in 'Experimental result 2.'
+
+Eric Dumazet suggested to change the class mtu parameter when using TSO.  The result is shown in 'Experimental result 3.'
 
 = Experiment =
 
@@ -84,6 +86,15 @@ The accuracy improves compared with the case of ubuntu 9.04, but it is not perfe
 http://pspacer.googlecode.com/svn/wiki/images/bw.htb.png
 
 http://pspacer.googlecode.com/svn/wiki/images/bw.diff.htb.png
+
+== Experimental result 3 ==
+
+In my experimental setting, TSO (TCP segmentation offload) is enabled.  The myri10ge driver is passing 64KB packets to the NIC.
+
+I changed the class mtu parameter to 64000 instead of 9000.
+Fig.5 shows the results.  It's not so bad!
+
+http://pspacer.googlecode.com/svn/wiki/images/bw.diff.htb.2.png
 
 == test script ==
 {{{
