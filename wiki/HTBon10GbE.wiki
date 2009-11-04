@@ -107,5 +107,5 @@ sudo /sbin/tc qdisc del dev $DEV root
 }}}
 
 = Related link =
- * http://www.spinics.net/lists/netdev/msg111137.html (netdev list)
+ * [http://www.spinics.net/lists/netdev/msg111137.html HTB accuracy on 10GbE] (netdev list)
  * [http://www.spinics.net/lists/netdev/msg99304.html pkt_sched: Change PSCHED_SHIFT from 10 to 6] (netdev list)
