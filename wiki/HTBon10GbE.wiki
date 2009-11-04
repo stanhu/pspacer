@@ -65,7 +65,7 @@ I upgraded the ubuntu from version 9.04 to 9.10.  The kernel is 2.6.31-14, and i
 The results are shown in Fig.3 and 4.
 
 Note: The 2nd field of /proc/net/psched is different with the previous setting (ubuntu 9.04).
-It means the timer resolution improves from 1/1024 usec to 1/64 usec (see Related links).
+It means the timer resolution improves from 1 usec to 1/64 usec (see Related links).
 {{{
 $ cat /proc/net/psched 
 000003e8 00000040 000f4240 3b9aca00
