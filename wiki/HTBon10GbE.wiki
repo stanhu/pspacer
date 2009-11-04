@@ -106,6 +106,7 @@ while test $rate -lt 10000; do
 	echo -n "$f "
 	sudo /sbin/tc class change dev $DEV parent 1: classid 1:1 htb mtu $MTU rate ${rate}mbit
 	iperf -t 5 -l 128k -c $DEST | grep "bits/sec" | awk '{print $8}'
+	#iperf -t 60 -l 128k -c $DEST | grep "bits/sec" | awk '{print $7}'
 	sleep 1
 	rate=$((rate+100))
 done
@@ -117,3 +118,4 @@ sudo /sbin/tc qdisc del dev $DEV root
 = Related link =
  * [http://www.spinics.net/lists/netdev/msg111137.html HTB accuracy on 10GbE] (netdev list)
  * [http://www.spinics.net/lists/netdev/msg99304.html pkt_sched: Change PSCHED_SHIFT from 10 to 6] (netdev list)
+ * [http://marc.info/?l=linux-netdev&m=124453482324409&w=2 tc_core: Use double in tc_core_time2tick()] (netdev list)
