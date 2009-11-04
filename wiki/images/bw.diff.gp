@@ -1,6 +1,6 @@
 #set terminal postscript enhanced color
 set terminal png
-set output "bw.diff.png"
+set output "bw.diff.2.png"
 set size 1.0,1.0
 set key left top
 #set key box
@@ -19,4 +19,4 @@ set style line 3 lt 2 lw 2
 set style line 4 lt 4 lw 2
 plot \
 "bw.psp.9.85g.log" usi 1:($2-$1) axis x1y1 ti "PSPacer" ls 1 w l, \
-"bw.htb.log" usi 1:($2-$1) axis x1y1 ti "HTB" ls 2 w l
+"bw.htb.2.6.31-14.log" usi 1:($2-$1) axis x1y1 ti "HTB" ls 2 w l
