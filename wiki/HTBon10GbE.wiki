@@ -14,7 +14,7 @@ Patrick McHardy replied at the netdev list:
  netlink API use 32 bit for timing related values, which is too small
  to use more than microsecond resolution.
 
-The timer resolution improves on the kernel 2.6.31.  It is shown in 'Experimental results 2.'
+The timer resolution improves on the kernel 2.6.31.  It is shown in 'Experimental result 2.'
 
 = Experiment =
 
@@ -43,7 +43,7 @@ $ cat /proc/net/psched
 000003e8 00000400 000f4240 3b9aca00
 }}}
 
-== Experimental results ==
+== Experimental result 1 ==
 I measured the average bandwidth over a period of 5 seconds by using
 the Iperf benchmark. The target rate, which is controlled by both
 PSPacer and HTB, was set from 100 Mbps to 10 Gbps every
@@ -60,7 +60,7 @@ target rate.
 
 http://pspacer.googlecode.com/svn/wiki/images/bw.diff.png
 
-== Experimental results 2 ==
+== Experimental result 2 ==
 I upgraded the ubuntu from version 9.04 to 9.10.  The kernel is 2.6.31-14, and iproute2 is ss090324.
 The results are shown in Fig.3 and 4.
 
