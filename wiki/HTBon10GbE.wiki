@@ -8,6 +8,14 @@ I want to know what is happen, and what should be do for fixing it.
 
 Any comments and suggestions will be welcome.
 
+Patrick McHardy replied at the netdev list:
+
+ This is not an easy problem to fix. Userspace, the kernel and the
+ netlink API use 32 bit for timing related values, which is too small
+ to use more than microsecond resolution.
+
+The timer resolution improves on the kernel 2.6.31.  It is shown in 'Experimental results 2.'
+
 = Experiment =
 
 == Experimental setting ==
@@ -52,6 +60,23 @@ target rate.
 
 http://pspacer.googlecode.com/svn/wiki/images/bw.diff.png
 
+== Experimental results 2 ==
+I upgraded the ubuntu from version 9.04 to 9.10.  The kernel is 2.6.31-14, and iproute2 is ss090324.
+The results are shown in Fig.3 and 4.
+
+Note: The 2nd field of /proc/net/psched is different with the previous setting (ubuntu 9.04).
+It means the timer resolution improves from 1/1024 usec to 1/64 usec (see Related links).
+{{{
+$ cat /proc/net/psched 
+000003e8 00000040 000f4240 3b9aca00
+}}}
+
+The accuracy improves compared with the case of ubuntu 9.04, but it is not perfect.
+
+http://pspacer.googlecode.com/svn/wiki/images/bw.htb.png
+
+http://pspacer.googlecode.com/svn/wiki/images/bw.diff.htb.png
+
 == test script ==
 {{{
 $ cat iperf.bench.sh
@@ -80,3 +105,7 @@ done
 # clean up HTB.
 sudo /sbin/tc qdisc del dev $DEV root
 }}}
+
+= Related link =
+ * http://www.spinics.net/lists/netdev/msg111137.html (netdev list)
+ * [http://www.spinics.net/lists/netdev/msg99304.html pkt_sched: Change PSCHED_SHIFT from 10 to 6] (netdev list)
