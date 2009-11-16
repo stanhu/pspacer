@@ -22,7 +22,7 @@ The packet scheduler might be possible to use a finer resolution keeping the 32 
 The scheduler timer resolution improves after the kernel 2.6.31 (See Jarek Poplawski's PSCHED_SHIFT patch).
 The result is shown in 'Experimental result 2.'
 
-Eric Dumazet suggested to change the class mtu parameter when using TSO.  The result is shown in 'Experimental result 3.'
+Eric Dumazet suggested to change the class mtu parameter when using TSO.  The result is shown in 'Experimental result 3.'  Setting large mtu is effective, but some precision is lost for small packets because of the estimation error in qdisc_l2t(). The rate table has only 256 slots.
 
 = Experiment =
 
