@@ -1219,7 +1219,7 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 			do_div(t, cl->hz);
 #endif
 		}
-		cl->clock += t;
+		cl->clock = clock + t;
 		break;
 	case TC_PSP_MODE_TEST:
 		cl->rate = cl->max_rate = cl->bps.av;
