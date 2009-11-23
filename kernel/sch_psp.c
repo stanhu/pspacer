@@ -1168,10 +1168,15 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	if (rate <= cl->rate || d1 != d) {
 	    rate = q->max_rate;
 	    d1 = d;
+	    if (rate == cl->rate) {
+		limit = 0;
+		goto nolimit;
+	    }
 	}
 	limit = ((u64)rate + cl->rate) * cl->rate;
 	do_div(limit,rate - cl->rate);
 	limit = QTIMEOUT(limit, d);
+nolimit:
 	rate = cl->rate;
 #endif
 	if ((t = len[d]) == 0)
@@ -1230,10 +1235,12 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	}
       gap0:
 #ifdef QTIMEOUT
-	if ((s64)(clock - cl->clock) > (s64)limit)
-		cl->clock = clock - limit;
-	else if ((s64)(cl->clock - clock) > (s64)limit)
-		cl->clock = clock + limit;
+	if (limit) {
+		if ((s64)(clock - cl->clock) > (s64)limit)
+			cl->clock = clock - limit;
+		else if ((s64)(cl->clock - clock) > (s64)limit)
+			cl->clock = clock + limit;
+	}
 #endif
 	/* moved from psp_dequeue() */
 	QSTATS(cl).backlog -= len[d];
