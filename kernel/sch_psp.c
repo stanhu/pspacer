@@ -104,7 +104,9 @@
 #define STRICT_TCP		/* safer but slower for multihomed link + variable window */
 #define USE_WINSCALE
 
-#ifndef CONFIG_NET_SCH_PSP_HARDCHAIN
+#ifdef CONFIG_NET_SCH_PSP_HARDCHAIN
+#undef QTIMEOUT
+#else
 #define QTIMEOUT(rate,direction) ((rate) >> 3)
 #endif
 
