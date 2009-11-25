@@ -91,3 +91,16 @@ config NET_SCH_PSP_RATESAFE
 	    - prevent packet dropping by other side (mode 2);
 	    - good perfomance (mode 1);
 	 - use Y.
+
+config NET_SCH_PSP_HARDCHAIN
+	bool "Always use upstream ethernet rate as clocksource"
+	depends on NET_SCH_PSP
+	---help---
+	 Say Y to always use upstream ethernet rate as clocksource ("permanent class clock reset").
+	 Say N to classic behaviour.
+
+	 If you say Y:
+	    - class clock will be always "resetting" to upstream hardware/ethernet clock;
+	    - target device queue overrun control code will be removed;
+	    - backrate/tcp (0x800) modes may be more dangerous (to overrun).
+	 You may use it if you have too many concurrent mode 1 classes and safe master ethernet rate.
