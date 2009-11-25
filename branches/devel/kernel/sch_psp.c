@@ -74,6 +74,7 @@
 //#define CONFIG_NET_SCH_PSP_FORCE_GAP
 //#define CONFIG_NET_SCH_PSP_FAST_SORT
 //#define CONFIG_NET_SCH_PSP_RATESAFE
+//#define CONFIG_NET_SCH_PSP_HARDCHAIN
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 #define PSP_HSIZE (16)
@@ -103,7 +104,9 @@
 #define STRICT_TCP		/* safer but slower for multihomed link + variable window */
 #define USE_WINSCALE
 
+#ifndef CONFIG_NET_SCH_PSP_HARDCHAIN
 #define QTIMEOUT(rate,direction) ((rate) >> 3)
+#endif
 
 #ifdef gap_u64
 typedef u64 clock_delta;
@@ -1131,8 +1134,9 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	struct psp_sched_data *q = qdisc_priv(sch);
 	clock_delta len[2] = { skb->len, SKB_BACKSIZE(skb) };
 	u64 t, clock;
-	unsigned int d, d1, npkt;
+	unsigned int d, npkt;
 #ifdef QTIMEOUT
+	unsigned int d1;
 	unsigned long rate;
 	u64 limit;
 #endif
@@ -1153,6 +1157,9 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	cl = list_root(cl);
       next:
 	d = cl->direction;
+#ifdef CONFIG_NET_SCH_PSP_HARDCHAIN
+	cl->clock = clock;
+#else
 	if (QSTATS(cl).backlog == 0)
 		/* reset too (for backrate) */
 		cl->state |= FLAG_DMARK;
@@ -1162,14 +1169,15 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 		/* reset to parent ethernet + its transfer time */
 		cl->clock = clock;
 	}
+#endif
 	if (cl->rate == 0)
 		goto normal;
 #ifdef QTIMEOUT
 	if (rate <= cl->rate || d1 != d) {
 	    rate = q->max_rate;
 	    d1 = d;
-	    if (rate == cl->rate) {
-		limit = 0;
+	    if (rate <= cl->rate) {
+		limit = QTIMEOUT(cl->rate, d);
 		goto nolimit;
 	    }
 	}
@@ -1235,12 +1243,10 @@ nolimit:
 	}
       gap0:
 #ifdef QTIMEOUT
-	if (limit) {
-		if ((s64)(clock - cl->clock) > (s64)limit)
-			cl->clock = clock - limit;
-		else if ((s64)(cl->clock - clock) > (s64)limit)
-			cl->clock = clock + limit;
-	}
+	if ((s64)(clock - cl->clock) > (s64)limit)
+		cl->clock = clock - limit;
+	else if ((s64)(cl->clock - clock) > (s64)limit)
+		cl->clock = clock + limit;
 #endif
 	/* moved from psp_dequeue() */
 	QSTATS(cl).backlog -= len[d];
