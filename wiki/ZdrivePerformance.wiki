@@ -20,6 +20,7 @@ My PC consists of two Intel Quad-core Xeon E5430 2.66~GHz, Intel 5100 chipset,
 4 GB memory (DDR2-667), and OCZ Z-Drive p84 (256 GB MLC), 
 which plugged into a PCI-Express x8 lane.
 The PC is running the Ubuntu 9.10 server edition and the Linux kernel is 2.6.31-14-server.
+The version of mptsas driver is 3.04.10.
 
 == Experimental result ==
 
