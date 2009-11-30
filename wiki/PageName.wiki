@@ -1,5 +1,5 @@
 #labels linux,mptsas,Z-Drive
-#Problem of OCZ Z-Drive p84 read performance
+Problem of OCZ Z-Drive p84 read performance
 
 = Summary =
 
@@ -65,5 +65,5 @@ for i in 1 4 16 64 256 512 1024 2048 4096 8192 16384 32768 65536; do
 done
 }}}
 
-= Related Links
+= Related Links =
  * [http://www.ocztechnology.com/products/solid_state_drives/ocz_z_drive_p84_pci_express_ssd OCZ Z-Drive p84 PCI-Express SSD] (OCZ)
