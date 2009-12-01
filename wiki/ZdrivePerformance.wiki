@@ -23,7 +23,7 @@ The PC is running the Ubuntu 9.10 server edition and the Linux kernel is 2.6.31-
 The version of mptsas driver is 3.04.10.  Z-Drive is formated with the ext3 file system.
 
 == Experimental result ==
-=== dd without direct I/O (default) ===
+=== dd on ext3 without direct I/O (default) ===
 
 || *block size* || *seq. write (MB/s)* || *seq. read (MB/s)* ||
 ||1024	||201	||241 ||
@@ -42,7 +42,7 @@ The version of mptsas driver is 3.04.10.  Z-Drive is formated with the ext3 file
 
 http://pspacer.googlecode.com/svn/wiki/images/p84.dd.png
 
-=== dd with direct I/O ===
+=== dd on ext3 with direct I/O ===
 Both option iflag=direct and oflag=direct are specified.
 
 || *block size* || *seq. write (MB/s)* || *seq. read (MB/s)* ||
@@ -61,6 +61,27 @@ Both option iflag=direct and oflag=direct are specified.
 ||67108864	||554	||543	||
 
 http://pspacer.googlecode.com/svn/wiki/images/p84.dd.direct.png
+
+=== dd on btrfs without direct I/O ===
+I tried btrfs with SSD mode.
+The read performance is constant, however the write performance gradually decreases due to continued usage (read & write).  It is another problem.
+
+|| *block size* || *seq. write (MB/s)* || *seq. read (MB/s)* ||
+||1024	||176	||605	||
+||4096	||435	||614	||
+||16384	||641	||620	||
+||65536	||664	||624	||
+||262144	||676	||618||	
+||524288	||677	||620||	
+||1048576	||674	||625||	
+||2097152	||666	||615||	
+||4194304	||652	||600||	
+||8388608	||625	||599||	
+||16777216	||633	||598||	
+||33554432	||629	||601||	
+||67108864	||624	||603||
+
+http://pspacer.googlecode.com/svn/wiki/images/p84.dd.btrfs.ssd.png
 
 == Test script ==
 This script assumes the target drive is /dev/sdb1 and it is mounted on /media/test.
