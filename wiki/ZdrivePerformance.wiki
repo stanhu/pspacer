@@ -20,9 +20,10 @@ My PC consists of two Intel Quad-core Xeon E5430 2.66~GHz, Intel 5100 chipset,
 4 GB memory (DDR2-667), and OCZ Z-Drive p84 (256 GB MLC), 
 which plugged into a PCI-Express x8 lane.
 The PC is running the Ubuntu 9.10 server edition and the Linux kernel is 2.6.31-14-server.
-The version of mptsas driver is 3.04.10.
+The version of mptsas driver is 3.04.10.  Z-Drive is formated with the ext3 file system.
 
 == Experimental result ==
+=== dd without direct I/O (default) ===
 
 || *block size* || *seq. write (MB/s)* || *seq. read (MB/s)* ||
 ||1024	||201	||241 ||
@@ -39,7 +40,27 @@ The version of mptsas driver is 3.04.10.
 ||33554432	||405	||242 ||
 ||67108864	||405	||242 ||
 
-http://pspacer.googlecode.com/svn/wiki/images/zdrive.dd.png
+http://pspacer.googlecode.com/svn/wiki/images/p84.dd.png
+
+=== dd with direct I/O ===
+Both option iflag=direct and oflag=direct are specified.
+
+|| *block size* || *seq. write (MB/s)* || *seq. read (MB/s)* ||
+||1024	||9.5	9.7	||
+||4096	||34.4	||28.3	||
+||16384	||95.8	||47.0	||
+||65536	||186	||121	||
+||262144	||382	||307	||
+||524288	||417	||366	||
+||1048576	||449	||380	||
+||2097152	||497	||467	||
+||4194304	||511	||532	||
+||8388608	||498	||560||
+||16777216	||523	||545	||
+||33554432	||555	||541	||
+||67108864	||554	||543	||
+
+http://pspacer.googlecode.com/svn/wiki/images/p84.dd.direct.png
 
 == Test script ==
 This script assumes the target drive is /dev/sdb1 and it is mounted on /media/test.
