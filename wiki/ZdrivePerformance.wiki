@@ -46,7 +46,7 @@ http://pspacer.googlecode.com/svn/wiki/images/p84.dd.png
 Both option iflag=direct and oflag=direct are specified.
 
 || *block size* || *seq. write (MB/s)* || *seq. read (MB/s)* ||
-||1024	||9.5	9.7	||
+||1024	||9.5	||9.7	||
 ||4096	||34.4	||28.3	||
 ||16384	||95.8	||47.0	||
 ||65536	||186	||121	||
