@@ -22,7 +22,7 @@ which plugged into a PCI-Express x8 lane.
 The PC is running the Ubuntu 9.10 server edition and the Linux kernel is 2.6.31-14-server.
 The version of mptsas driver is 3.04.10.  Z-Drive is formated with the ext3 file system.
 
-== Experimental result ==
+== Experimental result 1 ==
 === dd on ext3 without direct I/O (default) ===
 
 || *block size* || *seq. write (MB/s)* || *seq. read (MB/s)* ||
@@ -63,8 +63,7 @@ Both option iflag=direct and oflag=direct are specified.
 http://pspacer.googlecode.com/svn/wiki/images/p84.dd.direct.png
 
 === dd on btrfs without direct I/O ===
-I tried btrfs with SSD mode.
-The read performance is constant, however the write performance gradually decreases due to continued usage (read & write).  It is another problem. Figure.4 and Figure.5 show this behavior.  It is an effect of buffer cache.
+I tried btrfs with SSD mode, and I got better performance compared with ext3.
 
 || *block size* || *seq. write (MB/s)* || *seq. read (MB/s)* ||
 ||1024	||176	||605	||
@@ -83,7 +82,16 @@ The read performance is constant, however the write performance gradually decrea
 
 http://pspacer.googlecode.com/svn/wiki/images/p84.dd.btrfs.ssd.png
 
+== Experimental result 2 ==
+In previous experiment, the read performance is constant, however the write performance gradually decreases due to continued usage (read & write), as shown in Figure 4.  It is an effect of buffer cache.
+
+NOTE: The physical memory size is upgraded from 4GB to 8GB.
+
 http://pspacer.googlecode.com/svn/wiki/images/p84.aging.btrfs.png
+
+I retried dd with bs=1000000 count=16000.
+
+http://pspacer.googlecode.com/svn/wiki/images/p84.aging.btrfs.2.png
 
 == Test script ==
 This script assumes the target drive is /dev/sdb1 and it is mounted on /media/test.
