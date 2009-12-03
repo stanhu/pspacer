@@ -64,7 +64,7 @@ http://pspacer.googlecode.com/svn/wiki/images/p84.dd.direct.png
 
 === dd on btrfs without direct I/O ===
 I tried btrfs with SSD mode.
-The read performance is constant, however the write performance gradually decreases due to continued usage (read & write).  It is another problem. Figure.4 shows this behavior.
+The read performance is constant, however the write performance gradually decreases due to continued usage (read & write).  It is another problem. Figure.4 and Figure.5 show this behavior.  It is an effect of buffer cache.
 
 || *block size* || *seq. write (MB/s)* || *seq. read (MB/s)* ||
 ||1024	||176	||605	||
