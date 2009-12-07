@@ -66,21 +66,21 @@ http://pspacer.googlecode.com/svn/wiki/images/p84.dd.direct.png
 I tried btrfs with SSD mode, and I got better performance compared with ext3.
 
 || *block size* || *seq. write (MB/s)* || *seq. read (MB/s)* ||
-||1024	||176	||605	||
-||4096	||435	||614	||
-||16384	||641	||620	||
-||65536	||664	||624	||
-||262144	||676	||618||	
-||524288	||677	||620||	
-||1048576	||674	||625||	
-||2097152	||666	||615||	
-||4194304	||652	||600||	
-||8388608	||625	||599||	
-||16777216	||633	||598||	
-||33554432	||629	||601||	
-||67108864	||624	||603||
+||1024 ||162 ||583 ||
+||4096 ||427 ||603 ||
+||16384 ||579 ||608 ||
+||65536 ||604 ||610 ||
+||262144 ||604 ||610 ||
+||524288 ||611 ||611 ||
+||1048576 ||605 ||611 ||
+||2097152 ||612 ||605 ||
+||4194304 ||604 ||589 ||
+||8388608 ||598 ||587 ||
+||16777216 ||598 ||588 ||
+||33554432 ||599 ||584 ||
+||67108864 ||591 ||585 ||
 
-http://pspacer.googlecode.com/svn/wiki/images/p84.dd.btrfs.ssd.png
+http://pspacer.googlecode.com/svn/wiki/images/p84.dd.btrfs.2.png
 
 == Experimental result 2 ==
 In previous experiment, the read performance is constant, however the write performance gradually decreases due to continued usage (read & write), as shown in Figure 4.  It is an effect of buffer cache.
