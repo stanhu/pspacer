@@ -75,6 +75,7 @@
 //#define CONFIG_NET_SCH_PSP_FAST_SORT
 //#define CONFIG_NET_SCH_PSP_RATESAFE
 //#define CONFIG_NET_SCH_PSP_HARDCHAIN
+//#define CONFIG_NET_SCH_PSP_FAIRTCP
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 #define PSP_HSIZE (16)
@@ -1362,7 +1363,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 			if (t == 0) {
 				cdiff = d;
 				/* all next classes unrate this pkt */
-				goto cmp;
+				goto len0;
 			}
 			if (d < cdiff) {
 				x = cdiff;
@@ -1375,7 +1376,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 				if (d > 0)
 					d = 0;
 				cdiff = d;
-				goto cmp;
+				goto len0;
 			}
 			d = cdiff;
 #endif
@@ -1389,7 +1390,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 				}
 				/* skip classes unrated for this pkt */
 				if ((t = len[cl2->direction]) == 0)
-					goto cmp;
+					goto len0;
 				x = (s64) (cl2->clock - q->clock) - tt;
 				cl1 = cl2;
 				/* d - maximum. cdiff - minimum */
@@ -1398,8 +1399,23 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 				else if (x < cdiff)
 					cdiff = x;
 			}
+#ifndef CONFIG_NET_SCH_PSP_FAIRTCP
+			goto cmp;
+		len0:
+			while ((cl1 = cl1->next)) {
+				x = (s64) (cl1->clock - q->clock);
+				/* d - maximum. cdiff - minimum */
+				if (x > d)
+					d = x;
+				else if (x < cdiff)
+					cdiff = x;
+			}
+#endif
 		} else		/* not leaf or exception */
 			continue;
+#ifdef CONFIG_NET_SCH_PSP_FAIRTCP
+	len0:
+#endif
 	cmp:
 		if (d > 0) {
 			if (*diff > d)
