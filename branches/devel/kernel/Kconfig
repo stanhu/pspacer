@@ -104,3 +104,14 @@ config NET_SCH_PSP_HARDCHAIN
 	    - target device queue overrun control code will be removed;
 	    - backrate/tcp (0x800) modes may be more dangerous (to overrun).
 	 You may use it if you have too many concurrent mode 1 classes and safe master ethernet rate.
+
+config NET_SCH_PSP_FAIRTCP
+	bool "Pass unrated packets in tcp modes"
+	depends on NET_SCH_PSP
+	---help---
+	 For tcp/backrate modes.
+	 Say N to spend unrated (non-ack/non-tcp) packets until rated gap.
+	 Say Y to fall this packets ASAP.
+
+	 For too busy routers or in other cases, to minimize packets delay, say Y.
+	 For smoother mode 0x800 better N.
