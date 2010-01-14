@@ -65,7 +65,7 @@
 #define FCS    (4)		/* Frame Check Sequence(4) */
 #define MIN_TARGET_RATE (1000)	/* 1 KBytes/sec */
 
-/* remove next 8 lines before kernel inclusion ;) */
+/* remove next lines before kernel inclusion ;) */
 //#define CONFIG_NET_SCH_PSP_PKT_GAP
 //#define CONFIG_NET_SCH_PSP_NO_SYN_FAIRNESS
 //#define CONFIG_NET_SCH_PSP_NO_TTL
@@ -105,11 +105,7 @@
 #define STRICT_TCP		/* safer but slower for multihomed link + variable window */
 #define USE_WINSCALE
 
-#ifdef CONFIG_NET_SCH_PSP_HARDCHAIN
-#undef QTIMEOUT
-#else
 #define QTIMEOUT(rate,direction) ((rate) >> 3)
-#endif
 
 #ifdef gap_u64
 typedef u64 clock_delta;
@@ -1138,9 +1134,9 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	clock_delta len[2] = { skb->len, SKB_BACKSIZE(skb) };
 	u64 t, clock;
 	unsigned int d, npkt;
+	unsigned long rate;
 #ifdef QTIMEOUT
 	unsigned int d1;
-	unsigned long rate;
 	u64 limit;
 #endif
 
@@ -1176,6 +1172,10 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	if (cl->rate == 0)
 		goto normal;
 #ifdef QTIMEOUT
+#ifdef CONFIG_NET_SCH_PSP_HARDCHAIN
+	if (!d)
+		goto nolimit;
+#endif
 	if (rate <= cl->rate || d1 != d) {
 	    rate = q->max_rate;
 	    d1 = d;
@@ -1185,11 +1185,11 @@ static inline void update_clocks(struct sk_buff *skb, struct Qdisc *sch,
 	    }
 	}
 	limit = ((u64)rate + cl->rate) * cl->rate;
-	do_div(limit,rate - cl->rate);
+	do_div(limit, rate - cl->rate);
 	limit = QTIMEOUT(limit, d);
 nolimit:
-	rate = cl->rate;
 #endif
+	rate = cl->rate;
 	if ((t = len[d]) == 0)
 		goto gap0;
 	npkt = DIV_ROUND_UP((unsigned long)t, cl->mtu);
@@ -1199,7 +1199,7 @@ nolimit:
 	switch (cl->state & MAJOR_MODE_MASK) {
 	case TC_PSP_MODE_ESTIMATED_DATA:
 		/* broken ;) */
-		MUL_DIV_ROUND_UP(t, t, q->max_rate, cl->rate, cl->tail);
+		MUL_DIV_ROUND_UP(t, t, q->max_rate, rate, cl->tail);
 		/* t0 = t; */
 		cl->clock += t;
 		break;
@@ -1208,10 +1208,10 @@ nolimit:
 	case TC_PSP_MODE_STATIC:
 		/* hardware/ethernet */
 #ifdef CONFIG_NET_SCH_PSP_RATESAFE
-		MUL_DIV_ROUND(t, t, q->max_rate, cl->rate, cl->tail);
+		MUL_DIV_ROUND(t, t, q->max_rate, rate, cl->tail);
 #else
-		t = t * q->max_rate + cl->rate - 1;
-		do_div(t, cl->rate);
+		t = t * q->max_rate + rate - 1;
+		do_div(t, rate);
 #endif
 		clock = cl->clock += (cl->t = t);
 		break;
@@ -1219,18 +1219,18 @@ nolimit:
 		/* software/router/isp */
 		if (cl->hz == 0) {
 #ifdef CONFIG_NET_SCH_PSP_RATESAFE
-			MUL_DIV_ROUND_UP(t, t, q->max_rate, cl->rate, cl->tail);
+			MUL_DIV_ROUND_UP(t, t, q->max_rate, rate, cl->tail);
 #else
-			MUL_DIV_ROUND(t, t, q->max_rate, cl->rate, cl->tail);
+			MUL_DIV_ROUND(t, t, q->max_rate, rate, cl->tail);
 #endif
 		} else {
 #ifdef CONFIG_NET_SCH_PSP_RATESAFE
-			MUL_DIV_ROUND_UP(t, t, cl->hz, cl->rate, cl->tail1);
+			MUL_DIV_ROUND_UP(t, t, cl->hz, rate, cl->tail1);
 			MUL_DIV_ROUND_UP(t, t, q->max_rate, cl->hz, cl->tail);
 #else
 			/* rounds up to destination timer quantum, rate down */
-			t = t * cl->hz + cl->rate - 1;
-			do_div(t, cl->rate);
+			t = t * cl->hz + rate - 1;
+			do_div(t, rate);
 			t = t * q->max_rate + cl->hz - 1;
 			do_div(t, cl->hz);
 #endif
@@ -1246,10 +1246,16 @@ nolimit:
 	}
       gap0:
 #ifdef QTIMEOUT
+#ifdef CONFIG_NET_SCH_PSP_HARDCHAIN
+	if (d)
+#else
 	if ((s64)(clock - cl->clock) > (s64)limit)
 		cl->clock = clock - limit;
-	else if ((s64)(cl->clock - clock) > (s64)limit)
-		cl->clock = clock + limit;
+	else
+#endif
+		if ((s64)(cl->clock - clock) > (s64)limit)
+			cl->clock = clock + limit;
+
 #endif
 	/* moved from psp_dequeue() */
 	QSTATS(cl).backlog -= len[d];
