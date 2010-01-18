@@ -75,7 +75,7 @@
 //#define CONFIG_NET_SCH_PSP_FAST_SORT
 //#define CONFIG_NET_SCH_PSP_RATESAFE
 //#define CONFIG_NET_SCH_PSP_HARDCHAIN
-//#define CONFIG_NET_SCH_PSP_FAIRTCP
+//#define CONFIG_NET_SCH_PSP_TCPDELAY
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 #define PSP_HSIZE (16)
@@ -1405,7 +1405,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 				else if (x < cdiff)
 					cdiff = x;
 			}
-#ifndef CONFIG_NET_SCH_PSP_FAIRTCP
+#ifdef CONFIG_NET_SCH_PSP_TCPDELAY
 			goto cmp;
 		len0:
 			while ((cl1 = cl1->next)) {
@@ -1419,7 +1419,7 @@ static inline struct psp_class *lookup_early_class(const struct psp_sched_data
 #endif
 		} else		/* not leaf or exception */
 			continue;
-#ifdef CONFIG_NET_SCH_PSP_FAIRTCP
+#ifndef CONFIG_NET_SCH_PSP_TCPDELAY
 	len0:
 #endif
 	cmp:
