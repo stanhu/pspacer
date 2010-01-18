@@ -112,7 +112,7 @@ config NET_SCH_PSP_FAIRTCP
 	depends on NET_SCH_PSP
 	---help---
 	 For tcp/backrate modes.
-	 Say N to distribute backsize by data packets & spend unrated (non-ack/non-tcp) packets until rated gap.
+	 Say N spend unrated (non-ack/non-tcp) packets until rated gap.
 	 Say Y to spend only ACK packets.
 
 	 For too busy routers or in other cases, to minimize packets delay, say Y.
