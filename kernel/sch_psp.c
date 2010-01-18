@@ -184,9 +184,6 @@ struct hashitem {
 
 	u32 v[NODEVAL];
 	u32 ack_seq;
-#ifndef CONFIG_NET_SCH_PSP_FAIRTCP
-	u32 ack_size;
-#endif
 	u64 clock;
 #ifdef USE_WINSCALE
 #define HASH_ZERO (4*NODEVAL+14)
@@ -2095,9 +2092,6 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	if (TH->ack) {
 	      next_aseq:
 		a = 1;
-#ifndef CONFIG_NET_SCH_PSP_FAIRTCP
-		h->ack_size = 0;
-#endif
 		if (h->ack_seq && aseq) {
 #ifdef USE_WINSCALE
 			u8 *w = win2ws_get(win2ws, TH->window);
@@ -2114,12 +2108,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 				goto set_aseq;
 		}
 		if ((x = q->mtu - hdr_size))
-#ifdef CONFIG_NET_SCH_PSP_FAIRTCP
-			SKB_BACKSIZE(skb) =
-#else
-			h->ack_size =
-#endif
-				a + DIV_ROUND_UP(a, x) * hdr_size;
+			SKB_BACKSIZE(skb) = a + DIV_ROUND_UP(a, x) * hdr_size;
 		early = h->clock;
 	      set_aseq:
 		h->ack_seq = aseq;
@@ -2128,16 +2117,6 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	memcpy(&h->misc, th + 12, sizeof(h->misc));
 	/* h->end+=(TH->syn?1:(skb->len-hdr_size))+TH->fin; *//* rfc793 */
 	h->end += skb->len - hdr_size + TH->syn + TH->fin;
-#ifndef CONFIG_NET_SCH_PSP_FAIRTCP
-	/* distribute ack_size (waiting for) per data packets */
-	if (!res && h->seq > h->end && h->ack_size) {
-		a = mul_div(h->ack_size, skb->len - hdr_size, h->seq - h->end);
-		if(a <= h->ack_size)
-			h->ack_size -= SKB_BACKSIZE(skb) = a;
-		else
-			h->ack_size = 0;
-	}
-#endif
 #ifdef USE_WINSCALE
 	if (ws != -1)
 		h->ws = ws;
