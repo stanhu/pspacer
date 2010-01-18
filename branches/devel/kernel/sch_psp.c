@@ -2095,6 +2095,9 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 	if (TH->ack) {
 	      next_aseq:
 		a = 1;
+#ifndef CONFIG_NET_SCH_PSP_FAIRTCP
+		h->ack_size = 0;
+#endif
 		if (h->ack_seq && aseq) {
 #ifdef USE_WINSCALE
 			u8 *w = win2ws_get(win2ws, TH->window);
@@ -2110,12 +2113,13 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 			    )
 				goto set_aseq;
 		}
-#ifdef CONFIG_NET_SCH_PSP_FAIRTCP
 		if ((x = q->mtu - hdr_size))
-			SKB_BACKSIZE(skb) = a + DIV_ROUND_UP(a, x) * hdr_size;
+#ifdef CONFIG_NET_SCH_PSP_FAIRTCP
+			SKB_BACKSIZE(skb) =
 #else
-		h->ack_size = (x = q->mtu - hdr_size) ? a + DIV_ROUND_UP(a, x) * hdr_size : 0;
+			h->ack_size =
 #endif
+				a + DIV_ROUND_UP(a, x) * hdr_size;
 		early = h->clock;
 	      set_aseq:
 		h->ack_seq = aseq;
