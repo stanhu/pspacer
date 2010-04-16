@@ -1,0 +1,29 @@
+#labels linux,ioDrive,ext4,xfs
+Write Performance of ext4 filesystem on ioDrive duo
+
+My PC box has dual Intel Xeon W5590 3.33~GHz (8 cores), 48 GB memory, and Fusion-io ioDriveDuo (320 GB SLC). The CentOS 5.4 and the Linux kernel is 2.6.16-164.15.1.el5 are running on the box.
+
+I have measured the random write performance on several filesystems using fio benchmark (http://freshmeat.net/projects/fio/).
+
+The XFS performance increases as the number of thread increases.  On the other hands, the ext4 is not.
+
+The results are shown below:
+
+=== ext4 random write bandwidth ===
+http://pspacer.googlecode.com/svn/wiki/images/fio-ext4-write.png
+
+=== XFS random write bandwidth ===
+http://pspacer.googlecode.com/svn/wiki/images/fio-xfs-write.png
+
+== Test script ==
+{{{
+for nj in 1 2 4 8 16 32; do
+	fn="/mnt/raid_fs/test"
+	param="--filename=/mnt/test --direct=1 --invalidate=1 --iodepth=1 --size=5g  --name=fio --numjobs=${nj} --runtime=30 --group_reporting"
+
+	bn=randread
+	for i in 1k 2k 4k 8k 16k 32k 64k 128k 256k 512k 1m 2m 4m 8m; do
+		fio --rw=randread --bs=${i} ${param} 2>&1 > $LOG/${bn}_${nj}_${i}.txt
+	done
+done
+}}}
