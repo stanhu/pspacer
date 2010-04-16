@@ -5,9 +5,29 @@ My PC box has dual Intel Xeon W5590 3.33~GHz (8 cores), 48 GB memory, and Fusion
 
 I have measured the random write performance on several filesystems using fio benchmark (http://freshmeat.net/projects/fio/).
 
-The XFS performance increases as the number of thread increases.  On the other hands, the ext4 is not.
+The XFS performance grows as the number of thread increases.  On the other hands, the ext3 and the ext4 do not. In the both cases, I mount filesystems with the "noatime" option only.
 
 The results are shown below:
+
+|| *block size* || *XFS (1thr)* || *XFS (8thr)* || *ext4 (1thr)* || *ext4 (8thr)* ||
+||1024 ||20.943 ||71.287 ||21.563 ||20.886||
+||2048 ||40.130 ||144 ||42.063 ||40.448||
+||4096 ||73.668 ||290 ||75.598 ||76.356||
+||8192 ||131 ||635 ||133 ||131||
+||16384 ||212 ||1029 ||219 ||215||
+||32768 ||310 ||1169 ||326 ||316||
+||65536 ||399 ||1236 ||374 ||374||
+||131072 ||748 ||1332 ||718 ||676||
+||262144 ||895 ||1336 ||902 ||804||
+||524288 ||1000 ||1327 ||974 ||905||
+||1048576 ||1100 ||1308 ||1136 ||995||
+||2097152 ||1220 ||1276 ||1179 ||1082||
+||4194304 ||1230 ||1233 ||1270 ||1149||
+||8388608 ||1309 ||1233 ||1243 ||1188||
+
+(The unit is MB/s.)
+
+The question I have is what is the cause of the ext4 performance limitation.
 
 === ext4 random write bandwidth ===
 http://pspacer.googlecode.com/svn/wiki/images/fio-ext4-write.png
