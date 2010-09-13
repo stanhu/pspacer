@@ -2071,7 +2071,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
       new_connection:
 	/* change hashed connection to new */
 	if (cl->state & TC_PSP_MODE_RETRANS_DST)
-		tree_del(cl, iptree, &h->daddr, asz << 3, h->v[0], h->v[1]);
+		tree_del(cl, iptree, asz + &h->saddr, asz << 3, h->v[0], h->v[1]);
 	if (cl->state & TC_PSP_MODE_RETRANS_SRC)
 		tree_del(cl, iptree, &h->saddr, asz << 3, h->v[0], h->v[1]);
 #ifdef HASH_ZERO
@@ -2160,7 +2160,7 @@ static inline int retrans_check(struct sk_buff *skb, struct psp_class *cl,
 		asz = h->asize;
 #endif
 		if (cl->state & TC_PSP_MODE_RETRANS_DST)
-			tree_del(cl, iptree, &h->daddr, asz << 3, h->v[0],
+			tree_del(cl, iptree, asz + &h->saddr, asz << 3, h->v[0],
 				 h->v[1]);
 		if (cl->state & TC_PSP_MODE_RETRANS_SRC)
 			tree_del(cl, iptree, &h->saddr, asz << 3, h->v[0],
