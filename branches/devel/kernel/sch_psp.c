@@ -442,7 +442,10 @@ static inline u64 mul_div_up(const unsigned long x, const unsigned long y,
 
 static inline struct Qdisc *q_create_dflt(struct Qdisc *sch, u32 classid)
 {
-	return qdisc_create_dflt(qdisc_dev(sch),
+	return qdisc_create_dflt(
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,6,36)
+				qdisc_dev(sch),
+#endif
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
 				 sch->dev_queue,
 #endif
