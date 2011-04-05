@@ -1,0 +1,5 @@
+= Paper list =
+
+  * Ryousei Takano, Tomohiro Kudoh, Yuetsu Kodama, Motohiko Matsuda, Hiroshi Tezuka, Yutaka Ishikawa, "Design and Evaluation of Precise Software Pacing Mechanisms for Fast Long-Distance Networks", PFLDnet 2005.
+
+  * Ryousei Takano,	Tomohiro Kudoh,	Yuetsu Kodama,	Fumihiro Okazaki, "[http://www.internetconference.org/ic2010/PDF/ic2010-session-4-2.pdf High-resolution Timer-based Packet Pacing Mechanism on the Linux Operating System]", Internet Conference 2010.
