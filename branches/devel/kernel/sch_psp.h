@@ -153,6 +153,11 @@ skb_set_timestamp(struct sk_buff *skb, const struct timeval *stamp)
 #define _OPT(x) (x)
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,5,0)
+#define NLA_PUT(a,b,c,d) if (nla_put(a,b,c,d)) goto nla_put_failure
+#define NLA_PUT_U32(a,b,c) if (nla_put_u32(a,b,c)) goto nla_put_failure
+#endif
+
 #ifndef rtattr_parse_nested
 #define rtattr_parse_nested(tb, max, rta) \
 	rtattr_parse((tb), (max), RTA_DATA((rta)), RTA_PAYLOAD((rta)))
