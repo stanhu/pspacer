@@ -2489,15 +2489,17 @@ static void psp_reset(struct Qdisc *sch)
 	struct psp_sched_data *q = qdisc_priv(sch);
 	struct psp_class *cl;
 	unsigned int i;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27) && LINUX_VERSION_CODE < KERNEL_VERSION(3,9,0)
 	struct hlist_node *n;
 #endif
 
 	for (i = 0; i < PSP_HSIZE; i++) {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 		list_for_each_entry(cl, &q->hash[i], hlist) {
-#else
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(3,9,0)
 		hlist_for_each_entry(cl, n, &q->clhash.hash[i], common.hnode) {
+#else
+		hlist_for_each_entry(cl, &q->clhash.hash[i], common.hnode) {
 #endif
 			QSTATS(cl).qlen = 0;
 			QSTATS(cl).backlog = 0;
@@ -2740,7 +2742,10 @@ static void psp_destroy(struct Qdisc *sch)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 	struct psp_class *next;
 #else
-	struct hlist_node *n, *next;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,9,0)
+	struct hlist_node *n;
+#endif
+	struct hlist_node *next;
 	unsigned int i;
 #endif
 
@@ -2751,8 +2756,13 @@ static void psp_destroy(struct Qdisc *sch)
 	    psp_destroy_class(sch, cl);
 #else
 	for (i = 0; i < q->clhash.hashsize; i++) {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(3,9,0)
 		hlist_for_each_entry_safe(cl, n, next, &q->clhash.hash[i],
 					  common.hnode)
+#else
+		hlist_for_each_entry_safe(cl, next, &q->clhash.hash[i],
+					  common.hnode)
+#endif
 		    psp_destroy_class(sch, cl);
 	}
 	qdisc_class_hash_destroy(&q->clhash);
@@ -3129,7 +3139,7 @@ static void psp_walk(struct Qdisc *sch, struct qdisc_walker *arg)
 	struct psp_sched_data *q = qdisc_priv(sch);
 	unsigned int i;
 	struct psp_class *cl;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,27) && LINUX_VERSION_CODE < KERNEL_VERSION(3,9,0)
 	struct hlist_node *n;
 #endif
 
@@ -3139,8 +3149,10 @@ static void psp_walk(struct Qdisc *sch, struct qdisc_walker *arg)
 	for (i = 0; i < PSP_HSIZE; i++) {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,27)
 		list_for_each_entry(cl, &q->hash[i], hlist) {
-#else
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(3,9,0)
 		hlist_for_each_entry(cl, n, &q->clhash.hash[i], common.hnode) {
+#else
+		hlist_for_each_entry(cl, &q->clhash.hash[i], common.hnode) {
 #endif
 			if (arg->count < arg->skip) {
 				arg->count++;
