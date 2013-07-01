@@ -158,6 +158,10 @@ skb_set_timestamp(struct sk_buff *skb, const struct timeval *stamp)
 #define NLA_PUT_U32(a,b,c) if (nla_put_u32(a,b,c)) goto nla_put_failure
 #endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,10,0)
+#define random32 prandom_u32
+#endif
+
 #ifndef rtattr_parse_nested
 #define rtattr_parse_nested(tb, max, rta) \
 	rtattr_parse((tb), (max), RTA_DATA((rta)), RTA_PAYLOAD((rta)))
